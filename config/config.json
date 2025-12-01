@@ -1,32 +1,78 @@
 {
   "broker_type": "tradier",
   "strategy": "cs",
-  "symbols": [
-    "NVDA",
-    "GOOGL",
-    "AAPL",
-    "MSFT"
-  ],
-  "strike_offset_percent": 5.0,
-  "spread_width": 5.0,
+  "symbols": ["MSFT", "AAPL", "GOOGL", "NVDA", "USFR"],
   "contract_quantity": 1,
-  "collar_put_offset_percent": 5.0,
-  "collar_call_offset_percent": 5.0,
-  "collar_shares_per_symbol": 100,
-  "run_immediately": true,
+  "run_immediately": false,
   "execution_day": "Daily",
   "execution_time_offset_minutes": 30,
   "expiration_offset_weeks": 1,
-  "alpaca": {
-    "api_key": "${ALPACA_API_KEY}",
-    "api_secret": "${ALPACA_API_SECRET}",
-    "paper": true
+
+  "strategies": {
+    "pcs": {
+      "name": "Put Credit Spread",
+      "strike_offset_dollars": 10.0,
+      "strike_offset_percent": 5.0,
+      "spread_width": 5.0
+    },
+    "cs": {
+      "name": "Collar Strategy",
+      "put_offset_dollars": 10.0,
+      "call_offset_dollars": 10.0,
+      "put_offset_percent": 5.0,
+      "call_offset_percent": 5.0,
+      "shares_per_symbol": 100
+    },
+    "cc": {
+      "name": "Covered Call",
+      "offset_percent": 5.0,
+      "offset_dollars": 0.0,
+      "expiration_days": 10
+    },
+    "ws": {
+      "name": "Wheel Strategy",
+      "put_offset_percent": 5.0,
+      "call_offset_percent": 5.0,
+      "put_offset_dollars": 0.0,
+      "call_offset_dollars": 0.0,
+      "expiration_days": 15
+    },
+    "lcc": {
+      "name": "Laddered Covered Call",
+      "call_offset_percent": 5.0,
+      "call_offset_dollars": 0.0,
+      "coverage_ratio": 0.667,
+      "num_legs": 5
+    },
+    "dc": {
+      "name": "Double Calendar",
+      "symbol": "QQQ",
+      "put_offset_percent": 2.0,
+      "call_offset_percent": 2.0,
+      "short_days": 2,
+      "long_days": 4
+    },
+    "bf": {
+      "name": "Butterfly",
+      "symbol": "QQQ",
+      "wing_width": 5.0,
+      "expiration_days": 7
+    }
   },
-  "tradier": {
-    "api_token": "${TRADIER_API_TOKEN}",
-    "account_id": "${TRADIER_ACCOUNT_ID}",
-    "base_url": "https://sandbox.tradier.com"
+
+  "brokers": {
+    "alpaca": {
+      "api_key": "${ALPACA_API_KEY}",
+      "api_secret": "${ALPACA_API_SECRET}",
+      "paper": true
+    },
+    "tradier": {
+      "api_token": "${TRADIER_API_TOKEN}",
+      "account_id": "${TRADIER_ACCOUNT_ID}",
+      "base_url": "https://sandbox.tradier.com"
+    }
   },
+
   "logging": {
     "level": "INFO",
     "file_path": "logs/trading_bot.log"

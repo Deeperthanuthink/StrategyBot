@@ -44,6 +44,16 @@ class AccountInfo:
     portfolio_value: float
 
 
+@dataclass
+class Position:
+    """Represents a stock position."""
+    symbol: str
+    quantity: int
+    avg_cost: float
+    current_price: float
+    market_value: float
+
+
 class BaseBrokerClient(ABC):
     """Abstract base class for all broker clients."""
     
@@ -130,6 +140,27 @@ class BaseBrokerClient(ABC):
         pass
     
     @abstractmethod
+    def get_positions(self) -> List['Position']:
+        """Get all current stock positions.
+        
+        Returns:
+            List of Position objects
+        """
+        pass
+    
+    @abstractmethod
+    def get_position(self, symbol: str) -> Optional['Position']:
+        """Get position for a specific symbol.
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            Position object if found, None otherwise
+        """
+        pass
+    
+    @abstractmethod
     def submit_collar_order(self, symbol: str, put_strike: float, call_strike: float,
                            expiration: date, num_collars: int) -> OrderResult:
         """Submit a collar order (protective put + covered call).
@@ -140,6 +171,76 @@ class BaseBrokerClient(ABC):
             call_strike: Strike price for covered call
             expiration: Option expiration date
             num_collars: Number of collars (1 collar = 100 shares + 1 put + 1 call)
+            
+        Returns:
+            OrderResult with order ID and status
+        """
+        pass
+    
+    @abstractmethod
+    def submit_covered_call_order(self, symbol: str, call_strike: float,
+                                  expiration: date, num_contracts: int) -> OrderResult:
+        """Submit a covered call order (sell call against stock position).
+        
+        Args:
+            symbol: Stock symbol
+            call_strike: Strike price for covered call
+            expiration: Option expiration date
+            num_contracts: Number of contracts (1 contract = 100 shares)
+            
+        Returns:
+            OrderResult with order ID and status
+        """
+        pass
+
+    @abstractmethod
+    def submit_cash_secured_put_order(self, symbol: str, put_strike: float,
+                                      expiration: date, num_contracts: int) -> OrderResult:
+        """Submit a cash-secured put order (sell put to potentially buy shares).
+        
+        Args:
+            symbol: Stock symbol
+            put_strike: Strike price for put
+            expiration: Option expiration date
+            num_contracts: Number of contracts to sell
+            
+        Returns:
+            OrderResult with order ID and status
+        """
+        pass
+
+    @abstractmethod
+    def submit_double_calendar_order(self, symbol: str, put_strike: float, call_strike: float,
+                                     short_expiration: date, long_expiration: date,
+                                     num_contracts: int) -> OrderResult:
+        """Submit a double calendar spread order.
+        
+        Args:
+            symbol: Stock symbol
+            put_strike: Strike for put calendar
+            call_strike: Strike for call calendar
+            short_expiration: Near-term expiration (sell)
+            long_expiration: Longer-term expiration (buy)
+            num_contracts: Number of contracts per leg
+            
+        Returns:
+            OrderResult with order ID and status
+        """
+        pass
+
+    @abstractmethod
+    def submit_butterfly_order(self, symbol: str, lower_strike: float, middle_strike: float,
+                               upper_strike: float, expiration: date, 
+                               num_butterflies: int) -> OrderResult:
+        """Submit a butterfly spread order.
+        
+        Args:
+            symbol: Stock symbol
+            lower_strike: Lower wing strike (buy 1 call)
+            middle_strike: Body strike (sell 2 calls)
+            upper_strike: Upper wing strike (buy 1 call)
+            expiration: Option expiration date
+            num_butterflies: Number of butterflies
             
         Returns:
             OrderResult with order ID and status

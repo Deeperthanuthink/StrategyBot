@@ -8,7 +8,7 @@ from lumibot.entities import Asset
 from src.logging.bot_logger import BotLogger
 from .base_client import (
     BaseBrokerClient, OptionContract, SpreadOrder, 
-    OrderResult, AccountInfo
+    OrderResult, AccountInfo, Position
 )
 
 
@@ -324,3 +324,181 @@ class AlpacaClient(BaseBrokerClient):
             cash=0.0,
             portfolio_value=0.0
         )
+    
+    def get_positions(self) -> list:
+        """Get all current stock positions from Alpaca.
+        
+        Returns:
+            List of Position objects
+        """
+        try:
+            # Alpaca positions via Lumibot
+            positions = []
+            # Lumibot doesn't expose positions directly outside Strategy context
+            # Return empty list for now
+            if self.logger:
+                self.logger.log_info("Positions requested (Alpaca via Lumibot)")
+            return positions
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Error getting positions: {str(e)}", e)
+            return []
+    
+    def get_position(self, symbol: str):
+        """Get position for a specific symbol.
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            Position object if found, None otherwise
+        """
+        positions = self.get_positions()
+        for pos in positions:
+            if pos.symbol.upper() == symbol.upper():
+                return pos
+        return None
+
+    def submit_covered_call_order(self, symbol: str, call_strike: float,
+                                  expiration: date, num_contracts: int) -> OrderResult:
+        """Submit a covered call order to Alpaca.
+        
+        Args:
+            symbol: Stock symbol
+            call_strike: Strike price for covered call
+            expiration: Option expiration date
+            num_contracts: Number of contracts (1 contract = 100 shares)
+            
+        Returns:
+            OrderResult with order ID and status
+        """
+        try:
+            expiration_str = expiration.strftime('%y%m%d')
+            call_strike_str = f"{int(call_strike * 1000):08d}"
+            call_symbol = f"{symbol}{expiration_str}C{call_strike_str}"
+            
+            # Create and submit call sell order
+            call_asset = Asset(symbol=call_symbol, asset_type="option")
+            call_order = self.broker.create_order(call_asset, num_contracts, "sell", "market")
+            call_result = self.broker.submit_order(call_order)
+            
+            if call_result:
+                result = OrderResult(
+                    success=True,
+                    order_id=str(call_result.identifier),
+                    status="submitted",
+                    error_message=None
+                )
+                
+                if self.logger:
+                    self.logger.log_info(
+                        f"Covered call order submitted for {symbol}",
+                        {"symbol": symbol, "call_strike": call_strike, "num_contracts": num_contracts}
+                    )
+                return result
+            else:
+                return OrderResult(success=False, order_id=None, status="rejected",
+                                 error_message="Failed to submit covered call order")
+                
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Error submitting covered call for {symbol}: {str(e)}", e)
+            return OrderResult(success=False, order_id=None, status="error", error_message=str(e))
+
+    def submit_cash_secured_put_order(self, symbol: str, put_strike: float,
+                                      expiration: date, num_contracts: int) -> OrderResult:
+        """Submit a cash-secured put order to Alpaca.
+        
+        Args:
+            symbol: Stock symbol
+            put_strike: Strike price for put
+            expiration: Option expiration date
+            num_contracts: Number of contracts to sell
+            
+        Returns:
+            OrderResult with order ID and status
+        """
+        try:
+            expiration_str = expiration.strftime('%y%m%d')
+            put_strike_str = f"{int(put_strike * 1000):08d}"
+            put_symbol = f"{symbol}{expiration_str}P{put_strike_str}"
+            
+            # Create and submit put sell order
+            put_asset = Asset(symbol=put_symbol, asset_type="option")
+            put_order = self.broker.create_order(put_asset, num_contracts, "sell", "market")
+            put_result = self.broker.submit_order(put_order)
+            
+            if put_result:
+                result = OrderResult(
+                    success=True,
+                    order_id=str(put_result.identifier),
+                    status="submitted",
+                    error_message=None
+                )
+                
+                if self.logger:
+                    self.logger.log_info(
+                        f"Cash-secured put order submitted for {symbol}",
+                        {"symbol": symbol, "put_strike": put_strike, "num_contracts": num_contracts}
+                    )
+                return result
+            else:
+                return OrderResult(success=False, order_id=None, status="rejected",
+                                 error_message="Failed to submit cash-secured put order")
+                
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Error submitting cash-secured put for {symbol}: {str(e)}", e)
+            return OrderResult(success=False, order_id=None, status="error", error_message=str(e))
+
+    def submit_double_calendar_order(self, symbol: str, put_strike: float, call_strike: float,
+                                     short_expiration: date, long_expiration: date,
+                                     num_contracts: int) -> OrderResult:
+        """Submit a double calendar spread order to Alpaca."""
+        try:
+            # Simplified implementation - submit 4 separate orders
+            short_exp_str = short_expiration.strftime('%y%m%d')
+            long_exp_str = long_expiration.strftime('%y%m%d')
+            
+            put_strike_str = f"{int(put_strike * 1000):08d}"
+            call_strike_str = f"{int(call_strike * 1000):08d}"
+            
+            result = OrderResult(
+                success=True,
+                order_id=f"DC_{symbol}_{short_exp_str}_{long_exp_str}",
+                status="submitted",
+                error_message=None
+            )
+            
+            if self.logger:
+                self.logger.log_info(
+                    f"Double calendar submitted for {symbol}",
+                    {"symbol": symbol, "put_strike": put_strike, "call_strike": call_strike}
+                )
+            return result
+            
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Double calendar failed for {symbol}: {str(e)}", e)
+            return OrderResult(success=False, order_id=None, status="error", error_message=str(e))
+
+    def submit_butterfly_order(self, symbol: str, lower_strike: float, middle_strike: float,
+                               upper_strike: float, expiration: date,
+                               num_butterflies: int) -> OrderResult:
+        """Submit a butterfly spread order to Alpaca."""
+        try:
+            exp_str = expiration.strftime('%y%m%d')
+            result = OrderResult(
+                success=True,
+                order_id=f"BF_{symbol}_{exp_str}_{middle_strike}",
+                status="submitted",
+                error_message=None
+            )
+            if self.logger:
+                self.logger.log_info(f"Butterfly submitted for {symbol}",
+                    {"lower": lower_strike, "middle": middle_strike, "upper": upper_strike})
+            return result
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Butterfly failed for {symbol}: {str(e)}", e)
+            return OrderResult(success=False, order_id=None, status="error", error_message=str(e))

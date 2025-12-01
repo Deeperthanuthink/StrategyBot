@@ -49,19 +49,22 @@ class ConfigManager:
         # Get broker type
         broker_type = config_data.get('broker_type', 'tradier')
         
-        # Parse broker-specific credentials
+        # Parse broker-specific credentials (support both nested and flat structure)
         alpaca_credentials = None
         tradier_credentials = None
+        brokers = config_data.get('brokers', {})
         
         if broker_type.lower() == 'alpaca':
-            alpaca_data = config_data.get('alpaca', {})
+            # Try nested first, then flat
+            alpaca_data = brokers.get('alpaca', {}) or config_data.get('alpaca', {})
             alpaca_credentials = AlpacaCredentials(
                 api_key=alpaca_data.get('api_key', ''),
                 api_secret=alpaca_data.get('api_secret', ''),
                 paper=alpaca_data.get('paper', True)
             )
         elif broker_type.lower() == 'tradier':
-            tradier_data = config_data.get('tradier', {})
+            # Try nested first, then flat
+            tradier_data = brokers.get('tradier', {}) or config_data.get('tradier', {})
             tradier_credentials = TradierCredentials(
                 api_token=tradier_data.get('api_token', ''),
                 account_id=tradier_data.get('account_id', ''),
@@ -74,13 +77,26 @@ class ConfigManager:
             file_path=logging_data.get('file_path', 'logs/trading_bot.log')
         )
         
+        # Get nested strategy configs
+        strategies = config_data.get('strategies', {})
+        pcs_config = strategies.get('pcs', {})
+        cs_config = strategies.get('cs', {})
+        cc_config = strategies.get('cc', {})
+        ws_config = strategies.get('ws', {})
+        lcc_config = strategies.get('lcc', {})
+        dc_config = strategies.get('dc', {})
+        bf_config = strategies.get('bf', {})
+        
         # Create main config with type conversion error handling
         try:
             config = Config(
                 symbols=config_data.get('symbols', []),
                 strategy=config_data.get('strategy', 'pcs'),
-                strike_offset_percent=float(config_data.get('strike_offset_percent', 5.0)),
-                spread_width=float(config_data.get('spread_width', 5.0)),
+                # PCS settings
+                strike_offset_percent=float(pcs_config.get('strike_offset_percent', 5.0)),
+                strike_offset_dollars=float(pcs_config.get('strike_offset_dollars', 0.0)),
+                spread_width=float(pcs_config.get('spread_width', 5.0)),
+                # General settings
                 contract_quantity=int(config_data.get('contract_quantity', 1)),
                 run_immediately=config_data.get('run_immediately', False),
                 execution_day=config_data.get('execution_day', 'Tuesday'),
@@ -90,9 +106,37 @@ class ConfigManager:
                 alpaca_credentials=alpaca_credentials,
                 tradier_credentials=tradier_credentials,
                 logging_config=logging_config,
-                collar_put_offset_percent=float(config_data.get('collar_put_offset_percent', 5.0)),
-                collar_call_offset_percent=float(config_data.get('collar_call_offset_percent', 5.0)),
-                collar_shares_per_symbol=int(config_data.get('collar_shares_per_symbol', 100))
+                # Collar settings
+                collar_put_offset_percent=float(cs_config.get('put_offset_percent', 5.0)),
+                collar_call_offset_percent=float(cs_config.get('call_offset_percent', 5.0)),
+                collar_put_offset_dollars=float(cs_config.get('put_offset_dollars', 0.0)),
+                collar_call_offset_dollars=float(cs_config.get('call_offset_dollars', 0.0)),
+                collar_shares_per_symbol=int(cs_config.get('shares_per_symbol', 100)),
+                # Covered Call settings
+                covered_call_offset_percent=float(cc_config.get('offset_percent', 5.0)),
+                covered_call_offset_dollars=float(cc_config.get('offset_dollars', 0.0)),
+                covered_call_expiration_days=int(cc_config.get('expiration_days', 10)),
+                # Wheel settings
+                wheel_put_offset_percent=float(ws_config.get('put_offset_percent', 5.0)),
+                wheel_call_offset_percent=float(ws_config.get('call_offset_percent', 5.0)),
+                wheel_put_offset_dollars=float(ws_config.get('put_offset_dollars', 0.0)),
+                wheel_call_offset_dollars=float(ws_config.get('call_offset_dollars', 0.0)),
+                wheel_expiration_days=int(ws_config.get('expiration_days', 30)),
+                # Laddered CC settings
+                laddered_call_offset_percent=float(lcc_config.get('call_offset_percent', 5.0)),
+                laddered_call_offset_dollars=float(lcc_config.get('call_offset_dollars', 0.0)),
+                laddered_coverage_ratio=float(lcc_config.get('coverage_ratio', 0.667)),
+                laddered_num_legs=int(lcc_config.get('num_legs', 5)),
+                # Double Calendar settings
+                dc_put_offset_percent=float(dc_config.get('put_offset_percent', 2.0)),
+                dc_call_offset_percent=float(dc_config.get('call_offset_percent', 2.0)),
+                dc_short_days=int(dc_config.get('short_days', 2)),
+                dc_long_days=int(dc_config.get('long_days', 4)),
+                dc_symbol=dc_config.get('symbol', 'QQQ'),
+                # Butterfly settings
+                bf_wing_width=float(bf_config.get('wing_width', 5.0)),
+                bf_expiration_days=int(bf_config.get('expiration_days', 7)),
+                bf_symbol=bf_config.get('symbol', 'QQQ')
             )
         except (ValueError, TypeError) as e:
             raise ValueError(

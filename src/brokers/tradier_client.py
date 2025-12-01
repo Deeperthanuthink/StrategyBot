@@ -8,7 +8,7 @@ from lumibot.entities import Asset
 from src.logging.bot_logger import BotLogger
 from .base_client import (
     BaseBrokerClient, OptionContract, SpreadOrder,
-    OrderResult, AccountInfo
+    OrderResult, AccountInfo, Position
 )
 
 
@@ -670,3 +670,466 @@ class TradierClient(BaseBrokerClient):
                     {"error_type": type(e).__name__}
                 )
             raise
+    
+    def get_positions(self) -> list:
+        """Get all current stock positions from Tradier.
+        
+        Returns:
+            List of Position objects
+        """
+        try:
+            import requests
+            base_url = 'https://sandbox.tradier.com' if self.is_sandbox else 'https://api.tradier.com'
+            
+            response = requests.get(
+                f'{base_url}/v1/accounts/{self.account_id}/positions',
+                headers={
+                    'Authorization': f'Bearer {self.api_token}',
+                    'Accept': 'application/json'
+                }
+            )
+            
+            positions = []
+            
+            if response.status_code == 200:
+                data = response.json()
+                positions_data = data.get('positions', {})
+                
+                if positions_data == 'null' or not positions_data:
+                    return []
+                
+                position_list = positions_data.get('position', [])
+                
+                # Handle single position (not a list)
+                if isinstance(position_list, dict):
+                    position_list = [position_list]
+                
+                for pos in position_list:
+                    # Only include stock positions (not options)
+                    if pos.get('symbol') and len(pos.get('symbol', '')) <= 5:
+                        positions.append(Position(
+                            symbol=pos.get('symbol'),
+                            quantity=int(pos.get('quantity', 0)),
+                            avg_cost=float(pos.get('cost_basis', 0)) / max(int(pos.get('quantity', 1)), 1),
+                            current_price=float(pos.get('last_price', 0) or 0),
+                            market_value=float(pos.get('market_value', 0) or 0)
+                        ))
+            
+            if self.logger:
+                self.logger.log_info(
+                    f"Retrieved {len(positions)} stock positions",
+                    {"position_count": len(positions)}
+                )
+            
+            return positions
+            
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Error getting positions: {str(e)}", e)
+            return []
+    
+    def get_position(self, symbol: str):
+        """Get position for a specific symbol.
+        
+        Args:
+            symbol: Stock symbol
+            
+        Returns:
+            Position object if found, None otherwise
+        """
+        positions = self.get_positions()
+        for pos in positions:
+            if pos.symbol.upper() == symbol.upper():
+                return pos
+        return None
+
+    def submit_covered_call_order(self, symbol: str, call_strike: float,
+                                  expiration: date, num_contracts: int) -> OrderResult:
+        """Submit a covered call order to Tradier.
+        
+        Sells call options against existing stock position.
+        
+        Args:
+            symbol: Stock symbol
+            call_strike: Strike price for covered call
+            expiration: Option expiration date
+            num_contracts: Number of contracts (1 contract = 100 shares)
+            
+        Returns:
+            OrderResult with order ID and status
+        """
+        try:
+            import requests
+            
+            # Format expiration
+            expiration_str = expiration.strftime('%y%m%d')
+            
+            # Construct option symbol
+            call_strike_str = f"{int(call_strike * 1000):08d}"
+            call_symbol = f"{symbol}{expiration_str}C{call_strike_str}"
+            
+            base_url = 'https://sandbox.tradier.com' if self.is_sandbox else 'https://api.tradier.com'
+            
+            # Sell to open call
+            order_data = {
+                'class': 'option',
+                'symbol': symbol,
+                'option_symbol': call_symbol,
+                'side': 'sell_to_open',
+                'quantity': num_contracts,
+                'type': 'market',
+                'duration': 'gtc'
+            }
+            
+            response = requests.post(
+                f'{base_url}/v1/accounts/{self.account_id}/orders',
+                data=order_data,
+                headers={
+                    'Authorization': f'Bearer {self.api_token}',
+                    'Accept': 'application/json'
+                }
+            )
+            
+            if response.status_code in [200, 201]:
+                result_data = response.json()
+                order_info = result_data.get('order', {})
+                order_id = order_info.get('id')
+                
+                result = OrderResult(
+                    success=True,
+                    order_id=str(order_id) if order_id else None,
+                    status="submitted",
+                    error_message=None
+                )
+                
+                if self.logger:
+                    self.logger.log_info(
+                        f"Successfully submitted covered call order for {symbol}",
+                        {
+                            "symbol": symbol,
+                            "order_id": order_id,
+                            "call_strike": call_strike,
+                            "expiration": expiration.isoformat(),
+                            "num_contracts": num_contracts,
+                            "strategy": "covered_call"
+                        }
+                    )
+                
+                return result
+            else:
+                error_msg = f"Covered call order rejected: {response.status_code} - {response.text}"
+                
+                if self.logger:
+                    self.logger.log_error(
+                        f"Covered call order rejected for {symbol}: {error_msg}",
+                        None,
+                        {"symbol": symbol, "response": response.text}
+                    )
+                
+                return OrderResult(
+                    success=False,
+                    order_id=None,
+                    status="rejected",
+                    error_message=error_msg
+                )
+                
+        except Exception as e:
+            error_msg = f"Unexpected error submitting covered call for {symbol}: {str(e)}"
+            
+            if self.logger:
+                self.logger.log_error(error_msg, e, {"symbol": symbol})
+            
+            return OrderResult(
+                success=False,
+                order_id=None,
+                status="error",
+                error_message=str(e)
+            )
+
+    def submit_cash_secured_put_order(self, symbol: str, put_strike: float,
+                                      expiration: date, num_contracts: int) -> OrderResult:
+        """Submit a cash-secured put order to Tradier.
+        
+        Sells put options to collect premium and potentially buy shares.
+        
+        Args:
+            symbol: Stock symbol
+            put_strike: Strike price for put
+            expiration: Option expiration date
+            num_contracts: Number of contracts to sell
+            
+        Returns:
+            OrderResult with order ID and status
+        """
+        try:
+            import requests
+            
+            # Format expiration
+            expiration_str = expiration.strftime('%y%m%d')
+            
+            # Construct option symbol
+            put_strike_str = f"{int(put_strike * 1000):08d}"
+            put_symbol = f"{symbol}{expiration_str}P{put_strike_str}"
+            
+            base_url = 'https://sandbox.tradier.com' if self.is_sandbox else 'https://api.tradier.com'
+            
+            # Sell to open put
+            order_data = {
+                'class': 'option',
+                'symbol': symbol,
+                'option_symbol': put_symbol,
+                'side': 'sell_to_open',
+                'quantity': num_contracts,
+                'type': 'market',
+                'duration': 'gtc'
+            }
+            
+            response = requests.post(
+                f'{base_url}/v1/accounts/{self.account_id}/orders',
+                data=order_data,
+                headers={
+                    'Authorization': f'Bearer {self.api_token}',
+                    'Accept': 'application/json'
+                }
+            )
+            
+            if response.status_code in [200, 201]:
+                result_data = response.json()
+                order_info = result_data.get('order', {})
+                order_id = order_info.get('id')
+                
+                result = OrderResult(
+                    success=True,
+                    order_id=str(order_id) if order_id else None,
+                    status="submitted",
+                    error_message=None
+                )
+                
+                if self.logger:
+                    self.logger.log_info(
+                        f"Successfully submitted cash-secured put order for {symbol}",
+                        {
+                            "symbol": symbol,
+                            "order_id": order_id,
+                            "put_strike": put_strike,
+                            "expiration": expiration.isoformat(),
+                            "num_contracts": num_contracts,
+                            "strategy": "cash_secured_put"
+                        }
+                    )
+                
+                return result
+            else:
+                error_msg = f"Cash-secured put order rejected: {response.status_code} - {response.text}"
+                
+                if self.logger:
+                    self.logger.log_error(
+                        f"Cash-secured put order rejected for {symbol}: {error_msg}",
+                        None,
+                        {"symbol": symbol, "response": response.text}
+                    )
+                
+                return OrderResult(
+                    success=False,
+                    order_id=None,
+                    status="rejected",
+                    error_message=error_msg
+                )
+                
+        except Exception as e:
+            error_msg = f"Unexpected error submitting cash-secured put for {symbol}: {str(e)}"
+            
+            if self.logger:
+                self.logger.log_error(error_msg, e, {"symbol": symbol})
+            
+            return OrderResult(
+                success=False,
+                order_id=None,
+                status="error",
+                error_message=str(e)
+            )
+
+    def submit_double_calendar_order(self, symbol: str, put_strike: float, call_strike: float,
+                                     short_expiration: date, long_expiration: date,
+                                     num_contracts: int) -> OrderResult:
+        """Submit a double calendar spread order to Tradier.
+        
+        A double calendar has 4 legs:
+        1. Sell short-term put
+        2. Buy long-term put
+        3. Sell short-term call
+        4. Buy long-term call
+        """
+        try:
+            import requests
+            
+            short_exp_str = short_expiration.strftime('%y%m%d')
+            long_exp_str = long_expiration.strftime('%y%m%d')
+            
+            put_strike_str = f"{int(put_strike * 1000):08d}"
+            call_strike_str = f"{int(call_strike * 1000):08d}"
+            
+            # Option symbols
+            short_put = f"{symbol}{short_exp_str}P{put_strike_str}"
+            long_put = f"{symbol}{long_exp_str}P{put_strike_str}"
+            short_call = f"{symbol}{short_exp_str}C{call_strike_str}"
+            long_call = f"{symbol}{long_exp_str}C{call_strike_str}"
+            
+            base_url = 'https://sandbox.tradier.com' if self.is_sandbox else 'https://api.tradier.com'
+            
+            # Submit as 4 separate orders (Tradier doesn't support 4-leg in one order easily)
+            orders = [
+                {'symbol': short_put, 'side': 'sell_to_open', 'desc': 'Short Put'},
+                {'symbol': long_put, 'side': 'buy_to_open', 'desc': 'Long Put'},
+                {'symbol': short_call, 'side': 'sell_to_open', 'desc': 'Short Call'},
+                {'symbol': long_call, 'side': 'buy_to_open', 'desc': 'Long Call'},
+            ]
+            
+            order_ids = []
+            for order in orders:
+                order_data = {
+                    'class': 'option',
+                    'symbol': symbol,
+                    'option_symbol': order['symbol'],
+                    'side': order['side'],
+                    'quantity': num_contracts,
+                    'type': 'market',
+                    'duration': 'day'
+                }
+                
+                response = requests.post(
+                    f'{base_url}/v1/accounts/{self.account_id}/orders',
+                    data=order_data,
+                    headers={
+                        'Authorization': f'Bearer {self.api_token}',
+                        'Accept': 'application/json'
+                    }
+                )
+                
+                if response.status_code in [200, 201]:
+                    result_data = response.json()
+                    order_id = result_data.get('order', {}).get('id')
+                    order_ids.append(f"{order['desc']}:{order_id}")
+                else:
+                    if self.logger:
+                        self.logger.log_error(f"Failed to submit {order['desc']}: {response.text}")
+            
+            if len(order_ids) == 4:
+                result = OrderResult(
+                    success=True,
+                    order_id='|'.join(order_ids),
+                    status="submitted",
+                    error_message=None
+                )
+                
+                if self.logger:
+                    self.logger.log_info(
+                        f"Double calendar submitted for {symbol}",
+                        {
+                            "symbol": symbol,
+                            "put_strike": put_strike,
+                            "call_strike": call_strike,
+                            "short_exp": short_expiration.isoformat(),
+                            "long_exp": long_expiration.isoformat(),
+                            "order_ids": order_ids
+                        }
+                    )
+                return result
+            else:
+                return OrderResult(
+                    success=False,
+                    order_id='|'.join(order_ids) if order_ids else None,
+                    status="partial",
+                    error_message=f"Only {len(order_ids)}/4 legs submitted"
+                )
+                
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Double calendar failed for {symbol}: {str(e)}", e)
+            return OrderResult(success=False, order_id=None, status="error", error_message=str(e))
+
+    def submit_butterfly_order(self, symbol: str, lower_strike: float, middle_strike: float,
+                               upper_strike: float, expiration: date,
+                               num_butterflies: int) -> OrderResult:
+        """Submit a butterfly spread order to Tradier.
+        
+        Long Call Butterfly:
+        - Buy 1 lower strike call
+        - Sell 2 middle strike calls
+        - Buy 1 upper strike call
+        """
+        try:
+            import requests
+            
+            exp_str = expiration.strftime('%y%m%d')
+            lower_str = f"{int(lower_strike * 1000):08d}"
+            middle_str = f"{int(middle_strike * 1000):08d}"
+            upper_str = f"{int(upper_strike * 1000):08d}"
+            
+            lower_call = f"{symbol}{exp_str}C{lower_str}"
+            middle_call = f"{symbol}{exp_str}C{middle_str}"
+            upper_call = f"{symbol}{exp_str}C{upper_str}"
+            
+            base_url = 'https://sandbox.tradier.com' if self.is_sandbox else 'https://api.tradier.com'
+            
+            # Submit as multileg order
+            order_data = {
+                'class': 'multileg',
+                'symbol': symbol,
+                'type': 'debit',
+                'duration': 'day',
+                'price': '0.50',  # Limit price for debit
+                'option_symbol[0]': lower_call,
+                'side[0]': 'buy_to_open',
+                'quantity[0]': num_butterflies,
+                'option_symbol[1]': middle_call,
+                'side[1]': 'sell_to_open',
+                'quantity[1]': num_butterflies * 2,  # Sell 2x
+                'option_symbol[2]': upper_call,
+                'side[2]': 'buy_to_open',
+                'quantity[2]': num_butterflies
+            }
+            
+            response = requests.post(
+                f'{base_url}/v1/accounts/{self.account_id}/orders',
+                data=order_data,
+                headers={
+                    'Authorization': f'Bearer {self.api_token}',
+                    'Accept': 'application/json'
+                }
+            )
+            
+            if response.status_code in [200, 201]:
+                result_data = response.json()
+                order_id = result_data.get('order', {}).get('id')
+                
+                result = OrderResult(
+                    success=True,
+                    order_id=str(order_id) if order_id else None,
+                    status="submitted",
+                    error_message=None
+                )
+                
+                if self.logger:
+                    self.logger.log_info(
+                        f"Butterfly submitted for {symbol}",
+                        {
+                            "symbol": symbol,
+                            "lower": lower_strike,
+                            "middle": middle_strike,
+                            "upper": upper_strike,
+                            "expiration": expiration.isoformat(),
+                            "order_id": order_id
+                        }
+                    )
+                return result
+            else:
+                error_msg = f"Butterfly order rejected: {response.status_code} - {response.text}"
+                if self.logger:
+                    self.logger.log_error(f"Butterfly rejected for {symbol}: {error_msg}")
+                return OrderResult(success=False, order_id=None, status="rejected", error_message=error_msg)
+                
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Butterfly failed for {symbol}: {str(e)}", e)
+            return OrderResult(success=False, order_id=None, status="error", error_message=str(e))

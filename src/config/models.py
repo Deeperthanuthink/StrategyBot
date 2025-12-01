@@ -72,7 +72,6 @@ class Config:
     """Main configuration for the trading bot."""
     symbols: List[str]
     strategy: str  # "pcs" (put credit spread) or "cs" (collar)
-    strike_offset_percent: float
     spread_width: float
     contract_quantity: int
     run_immediately: bool  # If true, ignore execution_day and time, run right away
@@ -84,10 +83,46 @@ class Config:
     tradier_credentials: Optional[TradierCredentials]
     logging_config: LoggingConfig
     
+    # Strike offset - can be percent OR dollars (dollars takes precedence)
+    strike_offset_percent: float = 5.0  # Percentage below market price
+    strike_offset_dollars: float = 0.0  # Fixed dollar amount below market price
+    
     # Collar-specific settings (optional)
-    collar_put_offset_percent: float = 5.0  # How far below price for protective put
-    collar_call_offset_percent: float = 5.0  # How far above price for covered call
+    collar_put_offset_percent: float = 5.0  # How far below price for protective put (%)
+    collar_call_offset_percent: float = 5.0  # How far above price for covered call (%)
+    collar_put_offset_dollars: float = 0.0  # Fixed dollar amount below price for put
+    collar_call_offset_dollars: float = 0.0  # Fixed dollar amount above price for call
     collar_shares_per_symbol: int = 100  # Shares owned per symbol
+    
+    # Covered call settings (optional)
+    covered_call_offset_percent: float = 5.0  # How far above price for call (%)
+    covered_call_offset_dollars: float = 0.0  # Fixed dollar amount above price
+    covered_call_expiration_days: int = 10  # Target days until expiration
+    
+    # Wheel strategy settings (ws)
+    wheel_put_offset_percent: float = 5.0  # How far below price for CSP
+    wheel_call_offset_percent: float = 5.0  # How far above price for CC
+    wheel_put_offset_dollars: float = 0.0  # Fixed dollar offset for puts
+    wheel_call_offset_dollars: float = 0.0  # Fixed dollar offset for calls
+    wheel_expiration_days: int = 30  # Target days until expiration
+    
+    # Laddered Covered Call settings (lcc)
+    laddered_call_offset_percent: float = 5.0  # How far above price for calls
+    laddered_call_offset_dollars: float = 0.0  # Fixed dollar offset
+    laddered_coverage_ratio: float = 0.667  # 2/3 of holdings
+    laddered_num_legs: int = 5  # Number of expiration legs
+    
+    # Double Calendar settings (dc)
+    dc_put_offset_percent: float = 2.0  # How far below price for put strike
+    dc_call_offset_percent: float = 2.0  # How far above price for call strike
+    dc_short_days: int = 2  # Days until short leg expiration
+    dc_long_days: int = 4  # Days until long leg expiration
+    dc_symbol: str = "QQQ"  # Default symbol for double calendar
+    
+    # Butterfly settings (bf)
+    bf_wing_width: float = 5.0  # Distance between strikes in dollars
+    bf_expiration_days: int = 7  # Days until expiration
+    bf_symbol: str = "QQQ"  # Default symbol for butterfly
     
     def validate(self) -> tuple[bool, Optional[str]]:
         """Validate the entire configuration.
@@ -107,10 +142,12 @@ class Config:
             if not symbol.isalpha():
                 return False, f"Symbol '{symbol}' must contain only letters"
         
-        # Validate strike offset percent
-        if self.strike_offset_percent <= 0:
+        # Validate strike offset (either percent or dollars must be valid)
+        if self.strike_offset_dollars > 0:
+            pass  # Dollar offset is valid
+        elif self.strike_offset_percent <= 0:
             return False, "Strike offset percent must be positive"
-        if self.strike_offset_percent > 100:
+        elif self.strike_offset_percent > 100:
             return False, "Strike offset percent cannot exceed 100"
         
         # Validate spread width

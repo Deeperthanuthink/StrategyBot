@@ -9,7 +9,7 @@ from src.config.models import Config
 from src.brokers.broker_factory import BrokerFactory
 from src.brokers.base_client import BaseBrokerClient
 from src.strategy.strategy_calculator import StrategyCalculator, SpreadParameters
-from src.strategy.collar_strategy import CollarCalculator, CollarParameters
+from src.strategy.collar_strategy import CollarCalculator, CollarParameters, CoveredCallCalculator, CoveredCallParameters, WheelCalculator, LadderedCoveredCallCalculator, DoubleCalendarCalculator, ButterflyCalculator
 from src.order.order_manager import OrderManager, TradeResult
 from src.logging.bot_logger import BotLogger
 
@@ -103,9 +103,40 @@ class TradingBot:
             self.strategy_calculator = StrategyCalculator(self.config)
             self.collar_calculator = CollarCalculator(
                 put_offset_percent=self.config.collar_put_offset_percent,
-                call_offset_percent=self.config.collar_call_offset_percent
+                call_offset_percent=self.config.collar_call_offset_percent,
+                put_offset_dollars=self.config.collar_put_offset_dollars,
+                call_offset_dollars=self.config.collar_call_offset_dollars
             )
-            strategy_name = "Put Credit Spread" if self.config.strategy == "pcs" else "Collar"
+            self.covered_call_calculator = CoveredCallCalculator(
+                call_offset_percent=self.config.covered_call_offset_percent,
+                call_offset_dollars=self.config.covered_call_offset_dollars,
+                expiration_days=self.config.covered_call_expiration_days
+            )
+            self.wheel_calculator = WheelCalculator(
+                put_offset_percent=self.config.wheel_put_offset_percent,
+                call_offset_percent=self.config.wheel_call_offset_percent,
+                put_offset_dollars=self.config.wheel_put_offset_dollars,
+                call_offset_dollars=self.config.wheel_call_offset_dollars,
+                expiration_days=self.config.wheel_expiration_days
+            )
+            self.laddered_cc_calculator = LadderedCoveredCallCalculator(
+                call_offset_percent=self.config.laddered_call_offset_percent,
+                call_offset_dollars=self.config.laddered_call_offset_dollars,
+                coverage_ratio=self.config.laddered_coverage_ratio,
+                num_legs=self.config.laddered_num_legs
+            )
+            self.double_calendar_calculator = DoubleCalendarCalculator(
+                put_offset_percent=self.config.dc_put_offset_percent,
+                call_offset_percent=self.config.dc_call_offset_percent,
+                short_days=self.config.dc_short_days,
+                long_days=self.config.dc_long_days
+            )
+            self.butterfly_calculator = ButterflyCalculator(
+                wing_width=self.config.bf_wing_width,
+                expiration_days=self.config.bf_expiration_days
+            )
+            strategy_names = {"pcs": "Put Credit Spread", "cs": "Collar", "cc": "Covered Call", "ws": "Wheel Strategy", "lcc": "Laddered Covered Call", "dc": "Double Calendar", "bf": "Butterfly"}
+            strategy_name = strategy_names.get(self.config.strategy, "Unknown")
             self.logger.log_info(
                 f"Strategy calculators initialized ({strategy_name})",
                 {"strategy": self.config.strategy}
@@ -271,6 +302,19 @@ class TradingBot:
                 # Route to appropriate strategy
                 if self.config.strategy == 'cs':  # Collar Strategy
                     trade_result = self.process_collar_symbol(symbol)
+                elif self.config.strategy == 'cc':  # Covered Call Strategy
+                    trade_result = self.process_covered_call_symbol(symbol)
+                elif self.config.strategy == 'ws':  # Wheel Strategy
+                    trade_result = self.process_wheel_symbol(symbol)
+                elif self.config.strategy == 'lcc':  # Laddered Covered Call
+                    # This returns multiple results (one per leg)
+                    ladder_results = self.process_laddered_cc_symbol(symbol)
+                    trade_results.extend(ladder_results)
+                    continue  # Skip the single append below
+                elif self.config.strategy == 'dc':  # Double Calendar
+                    trade_result = self.process_double_calendar_symbol(symbol)
+                elif self.config.strategy == 'bf':  # Butterfly
+                    trade_result = self.process_butterfly_symbol(symbol)
                 else:  # pcs = Put Credit Spread (default)
                     trade_result = self.process_symbol(symbol)
                     
@@ -521,7 +565,8 @@ class TradingBot:
             # Calculate short strike (below market price)
             short_strike = self.strategy_calculator.calculate_short_strike(
                 current_price=current_price,
-                offset_percent=self.config.strike_offset_percent
+                offset_percent=self.config.strike_offset_percent,
+                offset_dollars=self.config.strike_offset_dollars
             )
             
             # Calculate long strike (below short strike)
@@ -924,6 +969,607 @@ class TradingBot:
                 }
             )
             
+            return TradeResult(
+                symbol=symbol,
+                success=False,
+                order_id=None,
+                short_strike=0.0,
+                long_strike=0.0,
+                expiration=date.today(),
+                quantity=0,
+                filled_price=None,
+                error_message=error_msg,
+                timestamp=timestamp
+            )
+
+    def process_covered_call_symbol(self, symbol: str) -> TradeResult:
+        """Process a single symbol using covered call strategy.
+        
+        Covered call strategy:
+        1. Checks that you own 100+ shares of the stock
+        2. Sells a call option above current price for income
+        
+        Args:
+            symbol: Stock symbol to process
+            
+        Returns:
+            TradeResult with execution details
+        """
+        timestamp = datetime.now()
+        
+        try:
+            # Check position first
+            position = self.broker_client.get_position(symbol)
+            if not position or position.quantity < 100:
+                shares = position.quantity if position else 0
+                error_msg = f"Insufficient shares: need 100, have {shares}"
+                self.logger.log_warning(
+                    f"Cannot sell covered call for {symbol}: {error_msg}",
+                    {"symbol": symbol, "shares_owned": shares}
+                )
+                return TradeResult(
+                    symbol=symbol,
+                    success=False,
+                    order_id=None,
+                    short_strike=0.0,
+                    long_strike=0.0,
+                    expiration=date.today(),
+                    quantity=0,
+                    filled_price=None,
+                    error_message=error_msg,
+                    timestamp=timestamp
+                )
+            
+            shares_owned = position.quantity
+            num_contracts = self.covered_call_calculator.calculate_num_contracts(shares_owned)
+            
+            # Get current market price
+            self.logger.log_info(f"Fetching current price for {symbol} (Covered Call Strategy)")
+            current_price = self.broker_client.get_current_price(symbol)
+            self.logger.log_info(
+                f"Current price for {symbol}: ${current_price:.2f}",
+                {"symbol": symbol, "price": current_price, "strategy": "covered_call"}
+            )
+            
+            # Calculate call strike target
+            call_strike_target = self.covered_call_calculator.calculate_call_strike(current_price)
+            
+            # Calculate expiration (~10 days out)
+            expiration = self.covered_call_calculator.calculate_expiration()
+            
+            self.logger.log_info(
+                f"Calculated covered call targets for {symbol}",
+                {
+                    "symbol": symbol,
+                    "call_target": f"${call_strike_target:.2f}",
+                    "expiration": expiration.isoformat(),
+                    "shares_owned": shares_owned,
+                    "num_contracts": num_contracts
+                }
+            )
+            
+            # Get option chain
+            self.logger.log_info(f"Retrieving option chain for {symbol}")
+            option_chain = self.broker_client.get_option_chain(symbol, expiration)
+            available_strikes = sorted(list(set([contract.strike for contract in option_chain])))
+            
+            # Find actual strike
+            call_strike = self.covered_call_calculator.find_nearest_strike_above(
+                call_strike_target, available_strikes
+            )
+            
+            self.logger.log_info(
+                f"Selected covered call strike for {symbol}",
+                {
+                    "symbol": symbol,
+                    "call_strike": f"${call_strike:.2f}",
+                    "expiration": expiration.isoformat()
+                }
+            )
+            
+            # Submit covered call order
+            self.logger.log_info(f"Submitting covered call order for {symbol}")
+            order_result = self.broker_client.submit_covered_call_order(
+                symbol=symbol,
+                call_strike=call_strike,
+                expiration=expiration,
+                num_contracts=num_contracts
+            )
+            
+            if order_result.success:
+                return TradeResult(
+                    symbol=symbol,
+                    success=True,
+                    order_id=order_result.order_id,
+                    short_strike=call_strike,
+                    long_strike=0.0,
+                    expiration=expiration,
+                    quantity=num_contracts,
+                    filled_price=None,
+                    error_message=None,
+                    timestamp=timestamp
+                )
+            else:
+                return TradeResult(
+                    symbol=symbol,
+                    success=False,
+                    order_id=None,
+                    short_strike=call_strike,
+                    long_strike=0.0,
+                    expiration=expiration,
+                    quantity=num_contracts,
+                    filled_price=None,
+                    error_message=order_result.error_message,
+                    timestamp=timestamp
+                )
+            
+        except Exception as e:
+            error_msg = f"Unexpected error: {type(e).__name__}: {str(e)}"
+            self.logger.log_error(
+                f"Unexpected error processing covered call for {symbol}",
+                e,
+                {
+                    "symbol": symbol,
+                    "error_type": type(e).__name__,
+                    "timestamp": timestamp.isoformat()
+                }
+            )
+            
+            return TradeResult(
+                symbol=symbol,
+                success=False,
+                order_id=None,
+                short_strike=0.0,
+                long_strike=0.0,
+                expiration=date.today(),
+                quantity=0,
+                filled_price=None,
+                error_message=error_msg,
+                timestamp=timestamp
+            )
+
+    def process_wheel_symbol(self, symbol: str) -> TradeResult:
+        """Process a single symbol using the Wheel strategy.
+        
+        The Wheel Strategy automatically determines the phase:
+        - If you DON'T own 100+ shares → Sell cash-secured put
+        - If you DO own 100+ shares → Sell covered call
+        
+        Args:
+            symbol: Stock symbol to process
+            
+        Returns:
+            TradeResult with execution details
+        """
+        timestamp = datetime.now()
+        
+        try:
+            # Check current position to determine phase
+            position = self.broker_client.get_position(symbol)
+            shares_owned = position.quantity if position else 0
+            
+            phase = self.wheel_calculator.determine_phase(shares_owned)
+            
+            self.logger.log_info(
+                f"Wheel strategy for {symbol}: Phase = {'Covered Call' if phase == 'cc' else 'Cash-Secured Put'}",
+                {"symbol": symbol, "shares_owned": shares_owned, "phase": phase}
+            )
+            
+            # Get current market price
+            current_price = self.broker_client.get_current_price(symbol)
+            self.logger.log_info(
+                f"Current price for {symbol}: ${current_price:.2f}",
+                {"symbol": symbol, "price": current_price, "strategy": "wheel"}
+            )
+            
+            # Calculate expiration
+            expiration = self.wheel_calculator.calculate_expiration()
+            
+            # Get option chain
+            option_chain = self.broker_client.get_option_chain(symbol, expiration)
+            available_strikes = sorted(list(set([contract.strike for contract in option_chain])))
+            
+            if phase == 'cc':
+                # Covered Call phase - sell calls
+                call_strike_target = self.wheel_calculator.calculate_call_strike(current_price)
+                call_strike = self.wheel_calculator.find_nearest_strike_above(
+                    call_strike_target, available_strikes
+                )
+                num_contracts = self.wheel_calculator.calculate_num_contracts(shares_owned)
+                
+                self.logger.log_info(
+                    f"Wheel CC: Selling {num_contracts} call(s) at ${call_strike:.2f}",
+                    {"symbol": symbol, "call_strike": call_strike, "expiration": expiration.isoformat()}
+                )
+                
+                order_result = self.broker_client.submit_covered_call_order(
+                    symbol=symbol,
+                    call_strike=call_strike,
+                    expiration=expiration,
+                    num_contracts=num_contracts
+                )
+                
+                return TradeResult(
+                    symbol=symbol,
+                    success=order_result.success,
+                    order_id=order_result.order_id,
+                    short_strike=call_strike,
+                    long_strike=0.0,
+                    expiration=expiration,
+                    quantity=num_contracts,
+                    filled_price=None,
+                    error_message=order_result.error_message,
+                    timestamp=timestamp
+                )
+            else:
+                # Cash-Secured Put phase - sell puts
+                put_strike_target = self.wheel_calculator.calculate_put_strike(current_price)
+                put_strike = self.wheel_calculator.find_nearest_strike_below(
+                    put_strike_target, available_strikes
+                )
+                num_contracts = 1  # Default to 1 contract for CSP
+                
+                self.logger.log_info(
+                    f"Wheel CSP: Selling {num_contracts} put(s) at ${put_strike:.2f}",
+                    {"symbol": symbol, "put_strike": put_strike, "expiration": expiration.isoformat()}
+                )
+                
+                order_result = self.broker_client.submit_cash_secured_put_order(
+                    symbol=symbol,
+                    put_strike=put_strike,
+                    expiration=expiration,
+                    num_contracts=num_contracts
+                )
+                
+                return TradeResult(
+                    symbol=symbol,
+                    success=order_result.success,
+                    order_id=order_result.order_id,
+                    short_strike=put_strike,
+                    long_strike=0.0,
+                    expiration=expiration,
+                    quantity=num_contracts,
+                    filled_price=None,
+                    error_message=order_result.error_message,
+                    timestamp=timestamp
+                )
+            
+        except Exception as e:
+            error_msg = f"Unexpected error: {type(e).__name__}: {str(e)}"
+            self.logger.log_error(
+                f"Unexpected error processing wheel for {symbol}",
+                e,
+                {"symbol": symbol, "error_type": type(e).__name__, "timestamp": timestamp.isoformat()}
+            )
+            
+            return TradeResult(
+                symbol=symbol,
+                success=False,
+                order_id=None,
+                short_strike=0.0,
+                long_strike=0.0,
+                expiration=date.today(),
+                quantity=0,
+                filled_price=None,
+                error_message=error_msg,
+                timestamp=timestamp
+            )
+
+    def process_laddered_cc_symbol(self, symbol: str) -> List[TradeResult]:
+        """Process a single symbol using Laddered Covered Call strategy.
+        
+        Sells covered calls on 2/3 of holdings across 5 expiration dates.
+        Each leg = 20% of the covered portion.
+        
+        Args:
+            symbol: Stock symbol to process
+            
+        Returns:
+            List of TradeResult (one per leg)
+        """
+        timestamp = datetime.now()
+        results = []
+        
+        try:
+            # Check current position
+            position = self.broker_client.get_position(symbol)
+            if not position or position.quantity < 100:
+                shares = position.quantity if position else 0
+                error_msg = f"Insufficient shares: need 100+, have {shares}"
+                self.logger.log_warning(
+                    f"Cannot execute laddered CC for {symbol}: {error_msg}",
+                    {"symbol": symbol, "shares_owned": shares}
+                )
+                return [TradeResult(
+                    symbol=symbol,
+                    success=False,
+                    order_id=None,
+                    short_strike=0.0,
+                    long_strike=0.0,
+                    expiration=date.today(),
+                    quantity=0,
+                    filled_price=None,
+                    error_message=error_msg,
+                    timestamp=timestamp
+                )]
+            
+            shares_owned = position.quantity
+            
+            # Get current price
+            current_price = self.broker_client.get_current_price(symbol)
+            self.logger.log_info(
+                f"Laddered CC for {symbol}: ${current_price:.2f}, {shares_owned} shares",
+                {"symbol": symbol, "price": current_price, "shares": shares_owned}
+            )
+            
+            # Calculate ladder
+            ladder = self.laddered_cc_calculator.calculate_ladder(shares_owned, current_price)
+            call_strike_target = self.laddered_cc_calculator.calculate_call_strike(current_price)
+            
+            total_contracts = sum(leg['contracts'] for leg in ladder)
+            self.logger.log_info(
+                f"Laddered CC: {total_contracts} contracts across {len(ladder)} legs",
+                {"symbol": symbol, "ladder": ladder}
+            )
+            
+            # Process each leg
+            for leg in ladder:
+                exp = leg['expiration']
+                num_contracts = leg['contracts']
+                leg_num = leg['leg']
+                
+                try:
+                    # Get option chain for this expiration
+                    option_chain = self.broker_client.get_option_chain(symbol, exp)
+                    available_strikes = sorted(list(set([c.strike for c in option_chain])))
+                    
+                    # Find actual strike
+                    call_strike = self.laddered_cc_calculator.find_nearest_strike_above(
+                        call_strike_target, available_strikes
+                    )
+                    
+                    self.logger.log_info(
+                        f"Leg {leg_num}: {num_contracts} call(s) @ ${call_strike:.2f}, exp {exp}",
+                        {"symbol": symbol, "leg": leg_num, "strike": call_strike, "exp": exp.isoformat()}
+                    )
+                    
+                    # Submit order
+                    order_result = self.broker_client.submit_covered_call_order(
+                        symbol=symbol,
+                        call_strike=call_strike,
+                        expiration=exp,
+                        num_contracts=num_contracts
+                    )
+                    
+                    results.append(TradeResult(
+                        symbol=f"{symbol}_L{leg_num}",
+                        success=order_result.success,
+                        order_id=order_result.order_id,
+                        short_strike=call_strike,
+                        long_strike=0.0,
+                        expiration=exp,
+                        quantity=num_contracts,
+                        filled_price=None,
+                        error_message=order_result.error_message,
+                        timestamp=timestamp
+                    ))
+                    
+                except Exception as leg_error:
+                    self.logger.log_error(f"Leg {leg_num} failed: {str(leg_error)}", leg_error)
+                    results.append(TradeResult(
+                        symbol=f"{symbol}_L{leg_num}",
+                        success=False,
+                        order_id=None,
+                        short_strike=call_strike_target,
+                        long_strike=0.0,
+                        expiration=exp,
+                        quantity=num_contracts,
+                        filled_price=None,
+                        error_message=str(leg_error),
+                        timestamp=timestamp
+                    ))
+            
+            return results
+            
+        except Exception as e:
+            error_msg = f"Unexpected error: {type(e).__name__}: {str(e)}"
+            self.logger.log_error(f"Laddered CC failed for {symbol}", e)
+            return [TradeResult(
+                symbol=symbol,
+                success=False,
+                order_id=None,
+                short_strike=0.0,
+                long_strike=0.0,
+                expiration=date.today(),
+                quantity=0,
+                filled_price=None,
+                error_message=error_msg,
+                timestamp=timestamp
+            )]
+
+    def process_double_calendar_symbol(self, symbol: str) -> TradeResult:
+        """Process a double calendar spread on a symbol.
+        
+        Double Calendar:
+        - Sell short-term put + Buy long-term put (lower strike)
+        - Sell short-term call + Buy long-term call (higher strike)
+        
+        Args:
+            symbol: Stock symbol (typically QQQ)
+            
+        Returns:
+            TradeResult with execution details
+        """
+        timestamp = datetime.now()
+        
+        try:
+            # Get current price
+            current_price = self.broker_client.get_current_price(symbol)
+            self.logger.log_info(
+                f"Double Calendar for {symbol}: ${current_price:.2f}",
+                {"symbol": symbol, "price": current_price, "strategy": "double_calendar"}
+            )
+            
+            # Calculate strikes
+            put_strike_target = self.double_calendar_calculator.calculate_put_strike(current_price)
+            call_strike_target = self.double_calendar_calculator.calculate_call_strike(current_price)
+            
+            # Calculate expirations
+            short_exp = self.double_calendar_calculator.calculate_short_expiration()
+            long_exp = self.double_calendar_calculator.calculate_long_expiration()
+            
+            self.logger.log_info(
+                f"DC targets: Put ${put_strike_target:.2f}, Call ${call_strike_target:.2f}",
+                {
+                    "symbol": symbol,
+                    "put_target": put_strike_target,
+                    "call_target": call_strike_target,
+                    "short_exp": short_exp.isoformat(),
+                    "long_exp": long_exp.isoformat()
+                }
+            )
+            
+            # Get option chains for both expirations
+            short_chain = self.broker_client.get_option_chain(symbol, short_exp)
+            long_chain = self.broker_client.get_option_chain(symbol, long_exp)
+            
+            short_strikes = sorted(list(set([c.strike for c in short_chain])))
+            long_strikes = sorted(list(set([c.strike for c in long_chain])))
+            
+            # Find actual strikes (use strikes available in both chains)
+            common_strikes = sorted(list(set(short_strikes) & set(long_strikes)))
+            if not common_strikes:
+                common_strikes = short_strikes  # Fallback
+            
+            put_strike = self.double_calendar_calculator.find_nearest_strike_below(
+                put_strike_target, common_strikes
+            )
+            call_strike = self.double_calendar_calculator.find_nearest_strike_above(
+                call_strike_target, common_strikes
+            )
+            
+            self.logger.log_info(
+                f"DC strikes: Put ${put_strike:.2f}, Call ${call_strike:.2f}",
+                {"symbol": symbol, "put_strike": put_strike, "call_strike": call_strike}
+            )
+            
+            # Submit double calendar order
+            num_contracts = self.config.contract_quantity
+            order_result = self.broker_client.submit_double_calendar_order(
+                symbol=symbol,
+                put_strike=put_strike,
+                call_strike=call_strike,
+                short_expiration=short_exp,
+                long_expiration=long_exp,
+                num_contracts=num_contracts
+            )
+            
+            return TradeResult(
+                symbol=symbol,
+                success=order_result.success,
+                order_id=order_result.order_id,
+                short_strike=put_strike,
+                long_strike=call_strike,
+                expiration=short_exp,
+                quantity=num_contracts,
+                filled_price=None,
+                error_message=order_result.error_message,
+                timestamp=timestamp
+            )
+            
+        except Exception as e:
+            error_msg = f"Unexpected error: {type(e).__name__}: {str(e)}"
+            self.logger.log_error(f"Double calendar failed for {symbol}", e)
+            return TradeResult(
+                symbol=symbol,
+                success=False,
+                order_id=None,
+                short_strike=0.0,
+                long_strike=0.0,
+                expiration=date.today(),
+                quantity=0,
+                filled_price=None,
+                error_message=error_msg,
+                timestamp=timestamp
+            )
+
+    def process_butterfly_symbol(self, symbol: str) -> TradeResult:
+        """Process a butterfly spread on a symbol.
+        
+        Long Call Butterfly:
+        - Buy 1 lower strike call
+        - Sell 2 middle strike calls (ATM)
+        - Buy 1 upper strike call
+        
+        Args:
+            symbol: Stock symbol (typically QQQ)
+            
+        Returns:
+            TradeResult with execution details
+        """
+        timestamp = datetime.now()
+        
+        try:
+            # Get current price
+            current_price = self.broker_client.get_current_price(symbol)
+            self.logger.log_info(
+                f"Butterfly for {symbol}: ${current_price:.2f}",
+                {"symbol": symbol, "price": current_price, "strategy": "butterfly"}
+            )
+            
+            # Calculate expiration
+            expiration = self.butterfly_calculator.calculate_expiration()
+            
+            # Get option chain
+            option_chain = self.broker_client.get_option_chain(symbol, expiration)
+            available_strikes = sorted(list(set([c.strike for c in option_chain])))
+            
+            # Calculate strikes
+            lower, middle, upper = self.butterfly_calculator.calculate_strikes(
+                current_price, available_strikes
+            )
+            
+            wing_width = middle - lower
+            
+            self.logger.log_info(
+                f"Butterfly strikes: ${lower:.2f} / ${middle:.2f} / ${upper:.2f}",
+                {
+                    "symbol": symbol,
+                    "lower": lower,
+                    "middle": middle,
+                    "upper": upper,
+                    "wing_width": wing_width,
+                    "expiration": expiration.isoformat()
+                }
+            )
+            
+            # Submit butterfly order
+            num_butterflies = self.config.contract_quantity
+            order_result = self.broker_client.submit_butterfly_order(
+                symbol=symbol,
+                lower_strike=lower,
+                middle_strike=middle,
+                upper_strike=upper,
+                expiration=expiration,
+                num_butterflies=num_butterflies
+            )
+            
+            return TradeResult(
+                symbol=symbol,
+                success=order_result.success,
+                order_id=order_result.order_id,
+                short_strike=middle,  # Middle is the "short" (sell 2)
+                long_strike=lower,    # Lower is one of the "longs"
+                expiration=expiration,
+                quantity=num_butterflies,
+                filled_price=None,
+                error_message=order_result.error_message,
+                timestamp=timestamp
+            )
+            
+        except Exception as e:
+            error_msg = f"Unexpected error: {type(e).__name__}: {str(e)}"
+            self.logger.log_error(f"Butterfly failed for {symbol}", e)
             return TradeResult(
                 symbol=symbol,
                 success=False,

@@ -47,14 +47,17 @@ class StrategyCalculator:
         """
         self._config = config
     
-    def calculate_short_strike(self, current_price: float, offset_percent: float) -> float:
+    def calculate_short_strike(self, current_price: float, offset_percent: float = 0.0, 
+                                offset_dollars: float = 0.0) -> float:
         """Calculate the short put strike price.
         
-        The short strike is calculated as a percentage below the current market price.
+        The short strike is calculated either as a fixed dollar amount below
+        the current price (if offset_dollars > 0) or as a percentage below.
         
         Args:
             current_price: Current market price of the underlying
             offset_percent: Percentage below market price (e.g., 5.0 for 5%)
+            offset_dollars: Fixed dollar amount below market price (takes precedence)
             
         Returns:
             Short strike price
@@ -64,10 +67,15 @@ class StrategyCalculator:
         """
         if current_price <= 0:
             raise ValueError("Current price must be positive")
-        if offset_percent <= 0 or offset_percent > 100:
-            raise ValueError("Offset percent must be between 0 and 100")
         
-        short_strike = current_price * (1 - offset_percent / 100)
+        # Dollar offset takes precedence
+        if offset_dollars > 0:
+            short_strike = current_price - offset_dollars
+        else:
+            if offset_percent <= 0 or offset_percent > 100:
+                raise ValueError("Offset percent must be between 0 and 100")
+            short_strike = current_price * (1 - offset_percent / 100)
+        
         return short_strike
     
     def calculate_long_strike(self, short_strike: float, spread_width: float) -> float:
