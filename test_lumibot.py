@@ -17,6 +17,7 @@ print()
 # Check if Lumibot is installed
 try:
     import lumibot
+
     print("✓ Lumibot is installed")
     print(f"  Version: {lumibot.__version__ if hasattr(lumibot, '__version__') else 'unknown'}")
 except ImportError:
@@ -27,14 +28,15 @@ except ImportError:
 # Check if Tradier broker is available
 try:
     from lumibot.brokers import Tradier
+
     print("✓ Lumibot Tradier broker is available")
 except ImportError:
     print("✗ Lumibot Tradier broker is NOT available")
     exit(1)
 
 # Check environment variables
-api_token = os.getenv('TRADIER_API_TOKEN')
-account_id = os.getenv('TRADIER_ACCOUNT_ID')
+api_token = os.getenv("TRADIER_API_TOKEN")
+account_id = os.getenv("TRADIER_ACCOUNT_ID")
 
 print()
 print("Environment Variables:")
@@ -59,11 +61,7 @@ if not api_token or not account_id:
 print()
 print("Testing Lumibot Tradier Broker:")
 try:
-    broker = Tradier(
-        access_token=api_token,
-        account_number=account_id,
-        paper=True  # Use sandbox
-    )
+    broker = Tradier(access_token=api_token, account_number=account_id, paper=True)  # Use sandbox
     print("✓ Lumibot Tradier broker initialized successfully")
     print(f"  Broker class: {broker.__class__.__name__}")
     print(f"  Broker module: {broker.__class__.__module__}")
@@ -90,6 +88,7 @@ print()
 print("Testing Market Data:")
 try:
     from lumibot.entities import Asset
+
     asset = Asset(symbol="AAPL", asset_type="stock")
     price = broker.get_last_price(asset)
     if price:
@@ -107,25 +106,25 @@ try:
     from src.tradier.lumibot_client import LumibotTradierClient
     from src.logging.bot_logger import BotLogger
     from src.config.models import LoggingConfig
-    
+
     # Create logger
     logging_config = LoggingConfig(level="INFO", file_path="logs/test.log")
     logger = BotLogger(logging_config)
-    
+
     # Create client
     client = LumibotTradierClient(
         api_token=api_token,
         account_id=account_id,
         base_url="https://sandbox.tradier.com",
-        logger=logger
+        logger=logger,
     )
-    
+
     print("✓ LumibotTradierClient initialized")
-    
+
     # Test authentication
     if client.authenticate():
         print("✓ LumibotTradierClient authentication successful")
-        
+
         # Get framework info
         info = client.get_framework_info()
         print(f"  Framework: {info['framework']}")
@@ -133,10 +132,11 @@ try:
         print(f"  Broker Class: {info['broker_class']}")
     else:
         print("✗ LumibotTradierClient authentication failed")
-        
+
 except Exception as e:
     print(f"✗ LumibotTradierClient test failed: {str(e)}")
     import traceback
+
     traceback.print_exc()
 
 print()
