@@ -278,3 +278,48 @@ class BaseBrokerClient(ABC):
             OrderResult with order ID and status
         """
         pass
+
+    @abstractmethod
+    def submit_iron_butterfly_order(self, symbol: str, lower_strike: float,
+                                    middle_strike: float, upper_strike: float,
+                                    expiration: date, num_contracts: int) -> OrderResult:
+        """Submit an iron butterfly order.
+        
+        Iron butterfly structure:
+        - Sell 1 ATM call (middle strike)
+        - Sell 1 ATM put (middle strike)
+        - Buy 1 OTM call (upper strike - protection)
+        - Buy 1 OTM put (lower strike - protection)
+        
+        Args:
+            symbol: Stock symbol
+            lower_strike: Lower wing strike (buy put)
+            middle_strike: ATM strike (sell call + sell put)
+            upper_strike: Upper wing strike (buy call)
+            expiration: Option expiration date
+            num_contracts: Number of iron butterflies
+            
+        Returns:
+            OrderResult with order ID and status
+        """
+        pass
+
+    @abstractmethod
+    def submit_short_strangle_order(self, symbol: str, put_strike: float,
+                                    call_strike: float, expiration: date,
+                                    num_contracts: int) -> OrderResult:
+        """Submit a short strangle order (sell OTM put + sell OTM call).
+        
+        WARNING: This strategy has UNDEFINED RISK on both sides!
+        
+        Args:
+            symbol: Stock symbol
+            put_strike: OTM put strike (below current price)
+            call_strike: OTM call strike (above current price)
+            expiration: Option expiration date
+            num_contracts: Number of strangles to sell
+            
+        Returns:
+            OrderResult with order ID and status
+        """
+        pass

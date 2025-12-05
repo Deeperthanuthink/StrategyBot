@@ -167,10 +167,22 @@ def select_strategy(symbol, shares_owned):
     print("        • Best when expecting high volatility")
     
     print()
+    print("  ib  - Iron Butterfly")
+    print("        • Sell ATM call + Sell ATM put + Buy wings")
+    print("        • Profits when stock stays near strike")
+    print("        • Defined risk, collects premium")
+    
+    print()
+    print("  ss  - Short Strangle ⚠️")
+    print("        • Sell OTM call + Sell OTM put")
+    print("        • Profits when stock stays in range")
+    print("        • ⚠️ UNDEFINED RISK - use with caution!")
+    
+    print()
     
     while True:
         try:
-            choice = input("  Enter strategy (pcs/cs/cc/ws/lcc/dc/bf/mp/ls): ").strip().lower()
+            choice = input("  Enter strategy (pcs/cs/cc/ws/lcc/dc/bf/mp/ls/ib/ss): ").strip().lower()
             
             if choice == 'pcs':
                 print("  ✅ Selected: Put Credit Spread")
@@ -211,8 +223,15 @@ def select_strategy(symbol, shares_owned):
             elif choice == 'ls':
                 print("  ✅ Selected: Long Straddle")
                 return 'ls'
+            elif choice == 'ib':
+                print("  ✅ Selected: Iron Butterfly")
+                return 'ib'
+            elif choice == 'ss':
+                print("  ⚠️ WARNING: Short Strangle has UNDEFINED RISK!")
+                print("  ✅ Selected: Short Strangle")
+                return 'ss'
             else:
-                print("  ❌ Enter 'pcs', 'cs', 'cc', 'ws', 'lcc', 'dc', 'bf', 'mp', or 'ls'")
+                print("  ❌ Enter 'pcs', 'cs', 'cc', 'ws', 'lcc', 'dc', 'bf', 'mp', 'ls', 'ib', or 'ss'")
                 
         except KeyboardInterrupt:
             print("\n\n  👋 Goodbye!")
@@ -232,7 +251,9 @@ def confirm_execution(symbol, strategy, shares_owned):
         'dc': 'Double Calendar (QQQ)',
         'bf': 'Butterfly (QQQ)',
         'mp': 'Married Put',
-        'ls': 'Long Straddle'
+        'ls': 'Long Straddle',
+        'ib': 'Iron Butterfly',
+        'ss': 'Short Strangle ⚠️'
     }
     strategy_name = strategy_names.get(strategy, strategy)
     
@@ -284,6 +305,19 @@ def confirm_execution(symbol, strategy, shares_owned):
         print(f"  Strike:     At-the-money (closest to current price)")
         print(f"  Expiry:     ~30 days out")
         print(f"  Profit:     Big move up OR down")
+    if strategy == 'ib':
+        print(f"  Action:     Sell ATM straddle + Buy OTM wings")
+        print(f"  Middle:     At-the-money (sell call + put)")
+        print(f"  Wings:      $5 above/below middle (buy protection)")
+        print(f"  Expiry:     ~30 days out")
+        print(f"  Profit:     Stock stays near middle strike")
+    if strategy == 'ss':
+        print(f"  ⚠️ WARNING: UNDEFINED RISK STRATEGY!")
+        print(f"  Action:     Sell OTM put + Sell OTM call")
+        print(f"  Put:        ~5% below current price")
+        print(f"  Call:       ~5% above current price")
+        print(f"  Expiry:     ~30 days out")
+        print(f"  Profit:     Stock stays between strikes")
     print()
     
     while True:
@@ -405,7 +439,7 @@ def execute_trade(symbol, strategy):
             print()
             
             if summary.successful_trades > 0:
-                strategy_names = {'pcs': 'Put Credit Spread', 'cs': 'Collar', 'cc': 'Covered Call', 'ws': 'Wheel', 'lcc': 'Laddered CC', 'dc': 'Double Calendar', 'bf': 'Butterfly', 'mp': 'Married Put', 'ls': 'Long Straddle'}
+                strategy_names = {'pcs': 'Put Credit Spread', 'cs': 'Collar', 'cc': 'Covered Call', 'ws': 'Wheel', 'lcc': 'Laddered CC', 'dc': 'Double Calendar', 'bf': 'Butterfly', 'mp': 'Married Put', 'ls': 'Long Straddle', 'ib': 'Iron Butterfly', 'ss': 'Short Strangle'}
                 strategy_name = strategy_names.get(strategy, strategy)
                 print(f"  ✅ SUCCESS!")
                 print(f"     Stock:    {symbol}")

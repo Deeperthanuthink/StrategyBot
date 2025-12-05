@@ -1391,3 +1391,245 @@ class TradierClient(BaseBrokerClient):
                 status="error",
                 error_message=str(e)
             )
+
+
+    def submit_iron_butterfly_order(self, symbol: str, lower_strike: float,
+                                    middle_strike: float, upper_strike: float,
+                                    expiration: date, num_contracts: int) -> OrderResult:
+        """Submit an iron butterfly order to Tradier.
+        
+        Iron butterfly structure:
+        - Sell 1 ATM call (middle strike)
+        - Sell 1 ATM put (middle strike)
+        - Buy 1 OTM call (upper strike)
+        - Buy 1 OTM put (lower strike)
+        
+        Args:
+            symbol: Stock symbol
+            lower_strike: Lower wing strike (buy put)
+            middle_strike: ATM strike (sell call + sell put)
+            upper_strike: Upper wing strike (buy call)
+            expiration: Option expiration date
+            num_contracts: Number of iron butterflies
+            
+        Returns:
+            OrderResult with order ID and status
+        """
+        try:
+            import requests
+            
+            base_url = 'https://sandbox.tradier.com' if self.is_sandbox else 'https://api.tradier.com'
+            
+            # Format expiration and strikes
+            exp_str = expiration.strftime('%y%m%d')
+            lower_str = f"{int(lower_strike * 1000):08d}"
+            middle_str = f"{int(middle_strike * 1000):08d}"
+            upper_str = f"{int(upper_strike * 1000):08d}"
+            
+            # Option symbols
+            lower_put = f"{symbol}{exp_str}P{lower_str}"    # Buy OTM put
+            middle_put = f"{symbol}{exp_str}P{middle_str}"  # Sell ATM put
+            middle_call = f"{symbol}{exp_str}C{middle_str}" # Sell ATM call
+            upper_call = f"{symbol}{exp_str}C{upper_str}"   # Buy OTM call
+            
+            # Submit 4 orders
+            orders = [
+                {'symbol': lower_put, 'side': 'buy_to_open', 'desc': 'Buy Lower Put'},
+                {'symbol': middle_put, 'side': 'sell_to_open', 'desc': 'Sell Middle Put'},
+                {'symbol': middle_call, 'side': 'sell_to_open', 'desc': 'Sell Middle Call'},
+                {'symbol': upper_call, 'side': 'buy_to_open', 'desc': 'Buy Upper Call'},
+            ]
+            
+            order_ids = []
+            for order in orders:
+                order_data = {
+                    'class': 'option',
+                    'symbol': symbol,
+                    'option_symbol': order['symbol'],
+                    'side': order['side'],
+                    'quantity': num_contracts,
+                    'type': 'market',
+                    'duration': 'day'
+                }
+                
+                response = requests.post(
+                    f'{base_url}/v1/accounts/{self.account_id}/orders',
+                    data=order_data,
+                    headers={
+                        'Authorization': f'Bearer {self.api_token}',
+                        'Accept': 'application/json'
+                    }
+                )
+                
+                if response.status_code in [200, 201]:
+                    result_data = response.json()
+                    order_id = result_data.get('order', {}).get('id')
+                    order_ids.append(f"{order['desc']}:{order_id}")
+                else:
+                    if self.logger:
+                        self.logger.log_error(f"Failed to submit {order['desc']}: {response.text}")
+            
+            if len(order_ids) == 4:
+                result = OrderResult(
+                    success=True,
+                    order_id='|'.join(order_ids),
+                    status="submitted",
+                    error_message=None
+                )
+                
+                if self.logger:
+                    self.logger.log_info(
+                        f"Iron butterfly submitted for {symbol}",
+                        {
+                            "symbol": symbol,
+                            "lower_strike": lower_strike,
+                            "middle_strike": middle_strike,
+                            "upper_strike": upper_strike,
+                            "expiration": expiration.isoformat(),
+                            "num_contracts": num_contracts,
+                            "order_ids": order_ids,
+                            "strategy": "iron_butterfly"
+                        }
+                    )
+                return result
+            else:
+                return OrderResult(
+                    success=False,
+                    order_id='|'.join(order_ids) if order_ids else None,
+                    status="partial",
+                    error_message=f"Only {len(order_ids)}/4 legs submitted"
+                )
+                
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Iron butterfly failed for {symbol}: {str(e)}", e)
+            return OrderResult(success=False, order_id=None, status="error", error_message=str(e))
+
+
+    def submit_short_strangle_order(self, symbol: str, put_strike: float,
+                                    call_strike: float, expiration: date,
+                                    num_contracts: int) -> OrderResult:
+        """Submit a short strangle order to Tradier.
+        
+        Short strangle structure:
+        - Sell OTM put (below current price)
+        - Sell OTM call (above current price)
+        
+        WARNING: UNDEFINED RISK on both sides!
+        
+        Args:
+            symbol: Stock symbol
+            put_strike: OTM put strike
+            call_strike: OTM call strike
+            expiration: Option expiration date
+            num_contracts: Number of strangles to sell
+            
+        Returns:
+            OrderResult with order ID and status
+        """
+        try:
+            import requests
+            
+            base_url = 'https://sandbox.tradier.com' if self.is_sandbox else 'https://api.tradier.com'
+            
+            # Format expiration and strikes
+            exp_str = expiration.strftime('%y%m%d')
+            put_str = f"{int(put_strike * 1000):08d}"
+            call_str = f"{int(call_strike * 1000):08d}"
+            
+            put_symbol = f"{symbol}{exp_str}P{put_str}"
+            call_symbol = f"{symbol}{exp_str}C{call_str}"
+            
+            # Order 1: Sell put
+            put_order_data = {
+                'class': 'option',
+                'symbol': symbol,
+                'option_symbol': put_symbol,
+                'side': 'sell_to_open',
+                'quantity': num_contracts,
+                'type': 'market',
+                'duration': 'day'
+            }
+            
+            put_response = requests.post(
+                f'{base_url}/v1/accounts/{self.account_id}/orders',
+                data=put_order_data,
+                headers={
+                    'Authorization': f'Bearer {self.api_token}',
+                    'Accept': 'application/json'
+                }
+            )
+            
+            # Order 2: Sell call
+            call_order_data = {
+                'class': 'option',
+                'symbol': symbol,
+                'option_symbol': call_symbol,
+                'side': 'sell_to_open',
+                'quantity': num_contracts,
+                'type': 'market',
+                'duration': 'day'
+            }
+            
+            call_response = requests.post(
+                f'{base_url}/v1/accounts/{self.account_id}/orders',
+                data=call_order_data,
+                headers={
+                    'Authorization': f'Bearer {self.api_token}',
+                    'Accept': 'application/json'
+                }
+            )
+            
+            # Check if both orders succeeded
+            if put_response.status_code in [200, 201] and call_response.status_code in [200, 201]:
+                put_data = put_response.json()
+                call_data = call_response.json()
+                
+                put_order_id = put_data.get('order', {}).get('id')
+                call_order_id = call_data.get('order', {}).get('id')
+                
+                result = OrderResult(
+                    success=True,
+                    order_id=f"PUT:{put_order_id}_CALL:{call_order_id}",
+                    status="submitted",
+                    error_message=None
+                )
+                
+                if self.logger:
+                    self.logger.log_info(
+                        f"Successfully submitted short strangle order for {symbol}",
+                        {
+                            "symbol": symbol,
+                            "put_order_id": put_order_id,
+                            "call_order_id": call_order_id,
+                            "put_strike": put_strike,
+                            "call_strike": call_strike,
+                            "expiration": expiration.isoformat(),
+                            "num_contracts": num_contracts,
+                            "strategy": "short_strangle",
+                            "warning": "UNDEFINED RISK"
+                        }
+                    )
+                
+                return result
+            else:
+                error_msg = f"Short strangle order failed - Put: {put_response.status_code}, Call: {call_response.status_code}"
+                
+                if self.logger:
+                    self.logger.log_error(
+                        f"Short strangle order rejected for {symbol}: {error_msg}",
+                        None,
+                        {"symbol": symbol, "put_response": put_response.text, "call_response": call_response.text}
+                    )
+                
+                return OrderResult(
+                    success=False,
+                    order_id=None,
+                    status="rejected",
+                    error_message=error_msg
+                )
+                
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Short strangle failed for {symbol}: {str(e)}", e)
+            return OrderResult(success=False, order_id=None, status="error", error_message=str(e))

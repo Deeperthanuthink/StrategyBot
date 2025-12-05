@@ -134,6 +134,17 @@ class Config:
     ls_expiration_days: int = 30  # Days until expiration
     ls_num_contracts: int = 1  # Number of straddles to buy
     
+    # Iron Butterfly settings (ib)
+    ib_wing_width: float = 5.0  # Distance from ATM to wing strikes
+    ib_expiration_days: int = 30  # Days until expiration
+    ib_num_contracts: int = 1  # Number of iron butterflies
+    
+    # Short Strangle settings (ss)
+    ss_put_offset_percent: float = 5.0  # How far below price for put strike
+    ss_call_offset_percent: float = 5.0  # How far above price for call strike
+    ss_expiration_days: int = 30  # Days until expiration
+    ss_num_contracts: int = 1  # Number of strangles to sell
+    
     def validate(self) -> tuple[bool, Optional[str]]:
         """Validate the entire configuration.
         

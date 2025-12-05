@@ -639,3 +639,179 @@ class AlpacaClient(BaseBrokerClient):
             if self.logger:
                 self.logger.log_error(f"Error submitting long straddle for {symbol}: {str(e)}", e)
             return OrderResult(success=False, order_id=None, status="error", error_message=str(e))
+
+
+    def submit_iron_butterfly_order(self, symbol: str, lower_strike: float,
+                                    middle_strike: float, upper_strike: float,
+                                    expiration: date, num_contracts: int) -> OrderResult:
+        """Submit an iron butterfly order to Alpaca.
+        
+        Iron butterfly structure:
+        - Sell 1 ATM call (middle strike)
+        - Sell 1 ATM put (middle strike)
+        - Buy 1 OTM call (upper strike)
+        - Buy 1 OTM put (lower strike)
+        
+        Args:
+            symbol: Stock symbol
+            lower_strike: Lower wing strike (buy put)
+            middle_strike: ATM strike (sell call + sell put)
+            upper_strike: Upper wing strike (buy call)
+            expiration: Option expiration date
+            num_contracts: Number of iron butterflies
+            
+        Returns:
+            OrderResult with order ID and status
+        """
+        try:
+            # Format expiration and strikes
+            exp_str = expiration.strftime('%y%m%d')
+            lower_str = f"{int(lower_strike * 1000):08d}"
+            middle_str = f"{int(middle_strike * 1000):08d}"
+            upper_str = f"{int(upper_strike * 1000):08d}"
+            
+            # Option symbols
+            lower_put = f"{symbol}{exp_str}P{lower_str}"
+            middle_put = f"{symbol}{exp_str}P{middle_str}"
+            middle_call = f"{symbol}{exp_str}C{middle_str}"
+            upper_call = f"{symbol}{exp_str}C{upper_str}"
+            
+            # Submit 4 orders
+            orders_submitted = []
+            
+            # Buy lower put
+            lower_put_asset = Asset(symbol=lower_put, asset_type="option")
+            lower_put_order = self.broker.create_order(lower_put_asset, num_contracts, "buy", "market")
+            lower_put_result = self.broker.submit_order(lower_put_order)
+            if lower_put_result:
+                orders_submitted.append(f"LowerPut:{lower_put_result.identifier}")
+            
+            # Sell middle put
+            middle_put_asset = Asset(symbol=middle_put, asset_type="option")
+            middle_put_order = self.broker.create_order(middle_put_asset, num_contracts, "sell", "market")
+            middle_put_result = self.broker.submit_order(middle_put_order)
+            if middle_put_result:
+                orders_submitted.append(f"MiddlePut:{middle_put_result.identifier}")
+            
+            # Sell middle call
+            middle_call_asset = Asset(symbol=middle_call, asset_type="option")
+            middle_call_order = self.broker.create_order(middle_call_asset, num_contracts, "sell", "market")
+            middle_call_result = self.broker.submit_order(middle_call_order)
+            if middle_call_result:
+                orders_submitted.append(f"MiddleCall:{middle_call_result.identifier}")
+            
+            # Buy upper call
+            upper_call_asset = Asset(symbol=upper_call, asset_type="option")
+            upper_call_order = self.broker.create_order(upper_call_asset, num_contracts, "buy", "market")
+            upper_call_result = self.broker.submit_order(upper_call_order)
+            if upper_call_result:
+                orders_submitted.append(f"UpperCall:{upper_call_result.identifier}")
+            
+            if len(orders_submitted) == 4:
+                result = OrderResult(
+                    success=True,
+                    order_id='|'.join(orders_submitted),
+                    status="submitted",
+                    error_message=None
+                )
+                
+                if self.logger:
+                    self.logger.log_info(
+                        f"Iron butterfly submitted for {symbol}",
+                        {
+                            "symbol": symbol,
+                            "lower": lower_strike,
+                            "middle": middle_strike,
+                            "upper": upper_strike,
+                            "expiration": expiration.isoformat(),
+                            "strategy": "iron_butterfly"
+                        }
+                    )
+                return result
+            else:
+                return OrderResult(
+                    success=False,
+                    order_id='|'.join(orders_submitted) if orders_submitted else None,
+                    status="partial",
+                    error_message=f"Only {len(orders_submitted)}/4 legs submitted"
+                )
+                
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Iron butterfly failed for {symbol}: {str(e)}", e)
+            return OrderResult(success=False, order_id=None, status="error", error_message=str(e))
+
+
+    def submit_short_strangle_order(self, symbol: str, put_strike: float,
+                                    call_strike: float, expiration: date,
+                                    num_contracts: int) -> OrderResult:
+        """Submit a short strangle order to Alpaca.
+        
+        Short strangle structure:
+        - Sell OTM put (below current price)
+        - Sell OTM call (above current price)
+        
+        WARNING: UNDEFINED RISK on both sides!
+        
+        Args:
+            symbol: Stock symbol
+            put_strike: OTM put strike
+            call_strike: OTM call strike
+            expiration: Option expiration date
+            num_contracts: Number of strangles to sell
+            
+        Returns:
+            OrderResult with order ID and status
+        """
+        try:
+            # Format expiration and strikes
+            exp_str = expiration.strftime('%y%m%d')
+            put_str = f"{int(put_strike * 1000):08d}"
+            call_str = f"{int(call_strike * 1000):08d}"
+            
+            put_symbol = f"{symbol}{exp_str}P{put_str}"
+            call_symbol = f"{symbol}{exp_str}C{call_str}"
+            
+            # Order 1: Sell put
+            put_asset = Asset(symbol=put_symbol, asset_type="option")
+            put_order = self.broker.create_order(put_asset, num_contracts, "sell", "market")
+            put_result = self.broker.submit_order(put_order)
+            
+            # Order 2: Sell call
+            call_asset = Asset(symbol=call_symbol, asset_type="option")
+            call_order = self.broker.create_order(call_asset, num_contracts, "sell", "market")
+            call_result = self.broker.submit_order(call_order)
+            
+            if put_result and call_result:
+                result = OrderResult(
+                    success=True,
+                    order_id=f"PUT:{put_result.identifier}_CALL:{call_result.identifier}",
+                    status="submitted",
+                    error_message=None
+                )
+                
+                if self.logger:
+                    self.logger.log_info(
+                        f"Short strangle order submitted for {symbol}",
+                        {
+                            "symbol": symbol,
+                            "put_strike": put_strike,
+                            "call_strike": call_strike,
+                            "expiration": expiration.isoformat(),
+                            "strategy": "short_strangle",
+                            "warning": "UNDEFINED RISK"
+                        }
+                    )
+                return result
+            else:
+                return OrderResult(
+                    success=False,
+                    order_id=None,
+                    status="rejected",
+                    error_message="Failed to submit one or both legs of short strangle"
+                )
+                
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Short strangle failed for {symbol}: {str(e)}", e)
+            return OrderResult(success=False, order_id=None, status="error", error_message=str(e))

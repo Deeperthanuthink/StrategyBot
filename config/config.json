@@ -74,6 +74,19 @@
       "name": "Long Straddle",
       "expiration_days": 30,
       "num_contracts": 1
+    },
+    "ib": {
+      "name": "Iron Butterfly",
+      "wing_width": 5.0,
+      "expiration_days": 30,
+      "num_contracts": 1
+    },
+    "ss": {
+      "name": "Short Strangle",
+      "put_offset_percent": 5.0,
+      "call_offset_percent": 5.0,
+      "expiration_days": 30,
+      "num_contracts": 1
     }
   },
   "brokers": {

@@ -88,6 +88,8 @@ class ConfigManager:
         bf_config = strategies.get('bf', {})
         mp_config = strategies.get('mp', {})
         ls_config = strategies.get('ls', {})
+        ib_config = strategies.get('ib', {})
+        ss_config = strategies.get('ss', {})
         
         # Create main config with type conversion error handling
         try:
@@ -146,7 +148,16 @@ class ConfigManager:
                 mp_shares_per_unit=int(mp_config.get('shares_per_unit', 100)),
                 # Long Straddle settings
                 ls_expiration_days=int(ls_config.get('expiration_days', 30)),
-                ls_num_contracts=int(ls_config.get('num_contracts', 1))
+                ls_num_contracts=int(ls_config.get('num_contracts', 1)),
+                # Iron Butterfly settings
+                ib_wing_width=float(ib_config.get('wing_width', 5.0)),
+                ib_expiration_days=int(ib_config.get('expiration_days', 30)),
+                ib_num_contracts=int(ib_config.get('num_contracts', 1)),
+                # Short Strangle settings
+                ss_put_offset_percent=float(ss_config.get('put_offset_percent', 5.0)),
+                ss_call_offset_percent=float(ss_config.get('call_offset_percent', 5.0)),
+                ss_expiration_days=int(ss_config.get('expiration_days', 30)),
+                ss_num_contracts=int(ss_config.get('num_contracts', 1))
             )
         except (ValueError, TypeError) as e:
             raise ValueError(

@@ -1155,3 +1155,327 @@ class LongStraddleCalculator:
         put_value = max(0, strike - final_price) * 100 * num_contracts
         
         return call_value + put_value - total_premium
+
+
+
+@dataclass
+class IronButterflyParameters:
+    """Parameters for an iron butterfly strategy.
+    
+    An iron butterfly consists of:
+    - Sell 1 ATM call
+    - Sell 1 ATM put
+    - Buy 1 OTM call (upper wing)
+    - Buy 1 OTM put (lower wing)
+    
+    All options have the same expiration.
+    Profits when stock stays near the ATM strike.
+    """
+    symbol: str
+    current_price: float
+    middle_strike: float  # ATM strike for short call and put
+    lower_strike: float   # OTM put (long)
+    upper_strike: float   # OTM call (long)
+    expiration: date
+    num_contracts: int
+
+
+class IronButterflyCalculator:
+    """Calculator for Iron Butterfly strategy.
+    
+    An iron butterfly is a neutral, limited-risk strategy that profits
+    when the underlying stays near the middle strike at expiration.
+    
+    Structure:
+    - Sell 1 ATM call (middle strike)
+    - Sell 1 ATM put (middle strike)
+    - Buy 1 OTM call (upper wing - protection)
+    - Buy 1 OTM put (lower wing - protection)
+    
+    Benefits:
+    - Defined risk (max loss = wing width - credit received)
+    - Collects premium from selling ATM straddle
+    - Wings provide protection against large moves
+    - High probability of profit if stock stays near strike
+    
+    Risks:
+    - Max profit only if stock exactly at middle strike
+    - Loses money on big moves (but loss is capped)
+    
+    Best used when:
+    - Expecting low volatility / range-bound market
+    - Stock likely to stay near current price
+    - Want defined risk with premium collection
+    
+    Max Profit: Net credit received (if stock = middle strike at expiration)
+    Max Loss: Wing width - Net credit (if stock beyond wings)
+    Breakevens: Middle strike ± Net credit received
+    """
+    
+    def __init__(self, wing_width: float = 5.0, expiration_days: int = 30,
+                 num_contracts: int = 1):
+        """Initialize iron butterfly calculator.
+        
+        Args:
+            wing_width: Distance from ATM to wing strikes (default $5)
+            expiration_days: Days until expiration (default 30)
+            num_contracts: Number of iron butterflies (default 1)
+        """
+        self.wing_width = wing_width
+        self.expiration_days = expiration_days
+        self.num_contracts = num_contracts
+    
+    def calculate_strikes(self, current_price: float, available_strikes: list) -> tuple:
+        """Calculate iron butterfly strikes.
+        
+        Args:
+            current_price: Current stock price
+            available_strikes: List of available strikes
+            
+        Returns:
+            Tuple of (lower_strike, middle_strike, upper_strike)
+        """
+        if not available_strikes:
+            raise ValueError("No strikes available")
+        
+        # Find middle strike (ATM - closest to current price)
+        middle_strike = min(available_strikes, key=lambda x: abs(x - current_price))
+        
+        # Calculate target wing strikes
+        target_lower = middle_strike - self.wing_width
+        target_upper = middle_strike + self.wing_width
+        
+        # Find actual available strikes for wings
+        lower_strike = self._find_nearest_strike(target_lower, available_strikes)
+        upper_strike = self._find_nearest_strike(target_upper, available_strikes)
+        
+        # Ensure wings are outside middle
+        if lower_strike >= middle_strike:
+            strikes_below = [s for s in available_strikes if s < middle_strike]
+            if strikes_below:
+                lower_strike = max(strikes_below)
+            else:
+                raise ValueError("No strikes available below middle strike")
+        
+        if upper_strike <= middle_strike:
+            strikes_above = [s for s in available_strikes if s > middle_strike]
+            if strikes_above:
+                upper_strike = min(strikes_above)
+            else:
+                raise ValueError("No strikes available above middle strike")
+        
+        return (lower_strike, middle_strike, upper_strike)
+    
+    def _find_nearest_strike(self, target: float, available_strikes: list) -> float:
+        """Find nearest available strike to target."""
+        return min(available_strikes, key=lambda x: abs(x - target))
+    
+    def calculate_expiration(self, from_date: date = None) -> date:
+        """Calculate expiration date (nearest Friday around target days).
+        
+        Args:
+            from_date: Starting date (default: today)
+            
+        Returns:
+            Expiration date (Friday)
+        """
+        from datetime import timedelta
+        
+        if from_date is None:
+            from_date = date.today()
+        
+        target = from_date + timedelta(days=self.expiration_days)
+        
+        # Find nearest Friday
+        days_until_friday = (4 - target.weekday()) % 7
+        if target.weekday() == 4:
+            return target
+        
+        friday_after = target + timedelta(days=days_until_friday)
+        friday_before = friday_after - timedelta(days=7)
+        
+        if friday_before >= from_date + timedelta(days=1):
+            if abs((friday_before - target).days) <= abs((friday_after - target).days):
+                return friday_before
+        return friday_after
+    
+    def calculate_max_profit(self, net_credit: float, num_contracts: int = 1) -> float:
+        """Calculate maximum profit.
+        
+        Max profit = Net credit received * 100 * contracts
+        Occurs when stock price equals middle strike at expiration.
+        
+        Args:
+            net_credit: Net credit received per contract
+            num_contracts: Number of iron butterflies
+            
+        Returns:
+            Maximum profit in dollars
+        """
+        return net_credit * 100 * num_contracts
+    
+    def calculate_max_loss(self, net_credit: float, wing_width: float,
+                          num_contracts: int = 1) -> float:
+        """Calculate maximum loss.
+        
+        Max loss = (Wing width - Net credit) * 100 * contracts
+        Occurs when stock price is beyond either wing at expiration.
+        
+        Args:
+            net_credit: Net credit received per contract
+            wing_width: Distance between middle and wing strikes
+            num_contracts: Number of iron butterflies
+            
+        Returns:
+            Maximum loss in dollars
+        """
+        return (wing_width - net_credit) * 100 * num_contracts
+    
+    def calculate_breakevens(self, middle_strike: float, net_credit: float) -> tuple:
+        """Calculate breakeven prices.
+        
+        Lower breakeven = Middle strike - Net credit
+        Upper breakeven = Middle strike + Net credit
+        
+        Args:
+            middle_strike: ATM strike price
+            net_credit: Net credit received per contract
+            
+        Returns:
+            Tuple of (lower_breakeven, upper_breakeven)
+        """
+        lower_be = middle_strike - net_credit
+        upper_be = middle_strike + net_credit
+        return (lower_be, upper_be)
+
+
+
+@dataclass
+class ShortStrangleParameters:
+    """Parameters for a short strangle strategy.
+    
+    A short strangle consists of:
+    - Sell 1 OTM call (above current price)
+    - Sell 1 OTM put (below current price)
+    
+    Collects premium, profits when stock stays between strikes.
+    WARNING: Undefined risk on both sides!
+    """
+    symbol: str
+    current_price: float
+    put_strike: float   # OTM put (below price)
+    call_strike: float  # OTM call (above price)
+    expiration: date
+    num_contracts: int
+
+
+class ShortStrangleCalculator:
+    """Calculator for Short Strangle strategy.
+    
+    A short strangle is a neutral, premium-collection strategy where you:
+    1. Sell an OTM put (below current price)
+    2. Sell an OTM call (above current price)
+    
+    Benefits:
+    - Collects premium from both options
+    - Wider profit range than short straddle
+    - Profits from time decay
+    - High probability of profit
+    
+    Risks:
+    - UNDEFINED RISK on both sides
+    - Large losses if stock moves significantly
+    - Requires margin
+    - Can lose more than premium collected
+    
+    Best used when:
+    - Expecting low volatility / range-bound market
+    - High implied volatility (collect more premium)
+    - Confident stock will stay in range
+    
+    Max Profit: Net credit received (if stock between strikes at expiration)
+    Max Loss: UNLIMITED on upside, substantial on downside (to zero)
+    Breakevens: Put strike - Credit, Call strike + Credit
+    """
+    
+    def __init__(self, put_offset_percent: float = 5.0, call_offset_percent: float = 5.0,
+                 expiration_days: int = 30, num_contracts: int = 1):
+        """Initialize short strangle calculator.
+        
+        Args:
+            put_offset_percent: How far below price for put (default 5%)
+            call_offset_percent: How far above price for call (default 5%)
+            expiration_days: Days until expiration (default 30)
+            num_contracts: Number of strangles to sell (default 1)
+        """
+        self.put_offset_percent = put_offset_percent
+        self.call_offset_percent = call_offset_percent
+        self.expiration_days = expiration_days
+        self.num_contracts = num_contracts
+    
+    def calculate_put_strike(self, current_price: float) -> float:
+        """Calculate OTM put strike (below current price)."""
+        return current_price * (1 - self.put_offset_percent / 100)
+    
+    def calculate_call_strike(self, current_price: float) -> float:
+        """Calculate OTM call strike (above current price)."""
+        return current_price * (1 + self.call_offset_percent / 100)
+    
+    def find_nearest_strike_below(self, target: float, available_strikes: list) -> float:
+        """Find nearest strike at or below target."""
+        strikes_below = [s for s in available_strikes if s <= target]
+        if not strikes_below:
+            raise ValueError(f"No strikes available at or below ${target}")
+        return max(strikes_below)
+    
+    def find_nearest_strike_above(self, target: float, available_strikes: list) -> float:
+        """Find nearest strike at or above target."""
+        strikes_above = [s for s in available_strikes if s >= target]
+        if not strikes_above:
+            raise ValueError(f"No strikes available at or above ${target}")
+        return min(strikes_above)
+    
+    def calculate_expiration(self, from_date: date = None) -> date:
+        """Calculate expiration date (nearest Friday around target days)."""
+        from datetime import timedelta
+        
+        if from_date is None:
+            from_date = date.today()
+        
+        target = from_date + timedelta(days=self.expiration_days)
+        
+        # Find nearest Friday
+        days_until_friday = (4 - target.weekday()) % 7
+        if target.weekday() == 4:
+            return target
+        
+        friday_after = target + timedelta(days=days_until_friday)
+        friday_before = friday_after - timedelta(days=7)
+        
+        if friday_before >= from_date + timedelta(days=1):
+            if abs((friday_before - target).days) <= abs((friday_after - target).days):
+                return friday_before
+        return friday_after
+    
+    def calculate_max_profit(self, net_credit: float, num_contracts: int = 1) -> float:
+        """Calculate maximum profit.
+        
+        Max profit = Net credit received * 100 * contracts
+        Occurs when stock price is between put and call strikes at expiration.
+        """
+        return net_credit * 100 * num_contracts
+    
+    def calculate_breakevens(self, put_strike: float, call_strike: float,
+                            net_credit: float) -> tuple:
+        """Calculate breakeven prices.
+        
+        Lower breakeven = Put strike - Net credit
+        Upper breakeven = Call strike + Net credit
+        """
+        lower_be = put_strike - net_credit
+        upper_be = call_strike + net_credit
+        return (lower_be, upper_be)
+    
+    def calculate_profit_range(self, put_strike: float, call_strike: float) -> float:
+        """Calculate the width of the profit range."""
+        return call_strike - put_strike

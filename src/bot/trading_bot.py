@@ -9,7 +9,7 @@ from src.config.models import Config
 from src.brokers.broker_factory import BrokerFactory
 from src.brokers.base_client import BaseBrokerClient
 from src.strategy.strategy_calculator import StrategyCalculator, SpreadParameters
-from src.strategy.collar_strategy import CollarCalculator, CollarParameters, CoveredCallCalculator, CoveredCallParameters, WheelCalculator, LadderedCoveredCallCalculator, DoubleCalendarCalculator, ButterflyCalculator, MarriedPutCalculator, LongStraddleCalculator
+from src.strategy.collar_strategy import CollarCalculator, CollarParameters, CoveredCallCalculator, CoveredCallParameters, WheelCalculator, LadderedCoveredCallCalculator, DoubleCalendarCalculator, ButterflyCalculator, MarriedPutCalculator, LongStraddleCalculator, IronButterflyCalculator, ShortStrangleCalculator
 from src.order.order_manager import OrderManager, TradeResult
 from src.logging.bot_logger import BotLogger
 
@@ -145,7 +145,18 @@ class TradingBot:
                 expiration_days=self.config.ls_expiration_days,
                 num_contracts=self.config.ls_num_contracts
             )
-            strategy_names = {"pcs": "Put Credit Spread", "cs": "Collar", "cc": "Covered Call", "ws": "Wheel Strategy", "lcc": "Laddered Covered Call", "dc": "Double Calendar", "bf": "Butterfly", "mp": "Married Put", "ls": "Long Straddle"}
+            self.iron_butterfly_calculator = IronButterflyCalculator(
+                wing_width=self.config.ib_wing_width,
+                expiration_days=self.config.ib_expiration_days,
+                num_contracts=self.config.ib_num_contracts
+            )
+            self.short_strangle_calculator = ShortStrangleCalculator(
+                put_offset_percent=self.config.ss_put_offset_percent,
+                call_offset_percent=self.config.ss_call_offset_percent,
+                expiration_days=self.config.ss_expiration_days,
+                num_contracts=self.config.ss_num_contracts
+            )
+            strategy_names = {"pcs": "Put Credit Spread", "cs": "Collar", "cc": "Covered Call", "ws": "Wheel Strategy", "lcc": "Laddered Covered Call", "dc": "Double Calendar", "bf": "Butterfly", "mp": "Married Put", "ls": "Long Straddle", "ib": "Iron Butterfly", "ss": "Short Strangle"}
             strategy_name = strategy_names.get(self.config.strategy, "Unknown")
             self.logger.log_info(
                 f"Strategy calculators initialized ({strategy_name})",
@@ -329,6 +340,10 @@ class TradingBot:
                     trade_result = self.process_married_put_symbol(symbol)
                 elif self.config.strategy == 'ls':  # Long Straddle
                     trade_result = self.process_long_straddle_symbol(symbol)
+                elif self.config.strategy == 'ib':  # Iron Butterfly
+                    trade_result = self.process_iron_butterfly_symbol(symbol)
+                elif self.config.strategy == 'ss':  # Short Strangle
+                    trade_result = self.process_short_strangle_symbol(symbol)
                 else:  # pcs = Put Credit Spread (default)
                     trade_result = self.process_symbol(symbol)
                     
@@ -1835,6 +1850,286 @@ class TradingBot:
             error_msg = f"Unexpected error: {type(e).__name__}: {str(e)}"
             self.logger.log_error(
                 f"Unexpected error processing long straddle for {symbol}",
+                e,
+                {
+                    "symbol": symbol,
+                    "error_type": type(e).__name__,
+                    "timestamp": timestamp.isoformat()
+                }
+            )
+            
+            return TradeResult(
+                symbol=symbol,
+                success=False,
+                order_id=None,
+                short_strike=0.0,
+                long_strike=0.0,
+                expiration=date.today(),
+                quantity=0,
+                filled_price=None,
+                error_message=error_msg,
+                timestamp=timestamp
+            )
+
+    def process_iron_butterfly_symbol(self, symbol: str) -> TradeResult:
+        """Process a single symbol using Iron Butterfly strategy.
+        
+        Iron Butterfly strategy:
+        1. Sell 1 ATM call (middle strike)
+        2. Sell 1 ATM put (middle strike)
+        3. Buy 1 OTM call (upper wing - protection)
+        4. Buy 1 OTM put (lower wing - protection)
+        
+        Profits when stock stays near the middle strike. Collects premium
+        from selling the ATM straddle, with wings providing protection.
+        
+        Args:
+            symbol: Stock symbol to process
+            
+        Returns:
+            TradeResult with execution details
+        """
+        timestamp = datetime.now()
+        
+        try:
+            # Get current market price
+            self.logger.log_info(f"Fetching current price for {symbol} (Iron Butterfly Strategy)")
+            current_price = self.broker_client.get_current_price(symbol)
+            self.logger.log_info(
+                f"Current price for {symbol}: ${current_price:.2f}",
+                {"symbol": symbol, "price": current_price, "strategy": "iron_butterfly"}
+            )
+            
+            # Calculate expiration
+            expiration = self.iron_butterfly_calculator.calculate_expiration()
+            
+            # Get number of contracts
+            num_contracts = self.config.ib_num_contracts
+            
+            self.logger.log_info(
+                f"Iron Butterfly targets for {symbol}",
+                {
+                    "symbol": symbol,
+                    "target_middle": f"${current_price:.2f} (ATM)",
+                    "wing_width": f"${self.config.ib_wing_width:.2f}",
+                    "expiration": expiration.isoformat(),
+                    "num_contracts": num_contracts
+                }
+            )
+            
+            # Get option chain
+            self.logger.log_info(f"Retrieving option chain for {symbol}")
+            option_chain = self.broker_client.get_option_chain(symbol, expiration)
+            available_strikes = sorted(list(set([contract.strike for contract in option_chain])))
+            
+            self.logger.log_info(
+                f"Retrieved {len(available_strikes)} available strikes for {symbol}",
+                {"symbol": symbol, "strike_count": len(available_strikes)}
+            )
+            
+            # Calculate strikes (lower, middle, upper)
+            lower_strike, middle_strike, upper_strike = self.iron_butterfly_calculator.calculate_strikes(
+                current_price, available_strikes
+            )
+            
+            wing_width = middle_strike - lower_strike
+            
+            self.logger.log_info(
+                f"Selected iron butterfly strikes for {symbol}",
+                {
+                    "symbol": symbol,
+                    "lower_strike": f"${lower_strike:.2f}",
+                    "middle_strike": f"${middle_strike:.2f}",
+                    "upper_strike": f"${upper_strike:.2f}",
+                    "wing_width": f"${wing_width:.2f}",
+                    "expiration": expiration.isoformat()
+                }
+            )
+            
+            # Submit iron butterfly order
+            self.logger.log_info(f"Submitting iron butterfly order for {symbol}")
+            order_result = self.broker_client.submit_iron_butterfly_order(
+                symbol=symbol,
+                lower_strike=lower_strike,
+                middle_strike=middle_strike,
+                upper_strike=upper_strike,
+                expiration=expiration,
+                num_contracts=num_contracts
+            )
+            
+            if order_result.success:
+                return TradeResult(
+                    symbol=symbol,
+                    success=True,
+                    order_id=order_result.order_id,
+                    short_strike=middle_strike,  # ATM strike where we sell
+                    long_strike=lower_strike,    # One of the wings
+                    expiration=expiration,
+                    quantity=num_contracts,
+                    filled_price=None,
+                    error_message=None,
+                    timestamp=timestamp
+                )
+            else:
+                return TradeResult(
+                    symbol=symbol,
+                    success=False,
+                    order_id=None,
+                    short_strike=middle_strike,
+                    long_strike=lower_strike,
+                    expiration=expiration,
+                    quantity=num_contracts,
+                    filled_price=None,
+                    error_message=order_result.error_message,
+                    timestamp=timestamp
+                )
+            
+        except Exception as e:
+            error_msg = f"Unexpected error: {type(e).__name__}: {str(e)}"
+            self.logger.log_error(
+                f"Unexpected error processing iron butterfly for {symbol}",
+                e,
+                {
+                    "symbol": symbol,
+                    "error_type": type(e).__name__,
+                    "timestamp": timestamp.isoformat()
+                }
+            )
+            
+            return TradeResult(
+                symbol=symbol,
+                success=False,
+                order_id=None,
+                short_strike=0.0,
+                long_strike=0.0,
+                expiration=date.today(),
+                quantity=0,
+                filled_price=None,
+                error_message=error_msg,
+                timestamp=timestamp
+            )
+
+    def process_short_strangle_symbol(self, symbol: str) -> TradeResult:
+        """Process a single symbol using Short Strangle strategy.
+        
+        Short Strangle strategy:
+        1. Sell 1 OTM put (below current price)
+        2. Sell 1 OTM call (above current price)
+        
+        Collects premium, profits when stock stays between strikes.
+        WARNING: This strategy has UNDEFINED RISK on both sides!
+        
+        Args:
+            symbol: Stock symbol to process
+            
+        Returns:
+            TradeResult with execution details
+        """
+        timestamp = datetime.now()
+        
+        try:
+            # Get current market price
+            self.logger.log_info(f"Fetching current price for {symbol} (Short Strangle Strategy)")
+            current_price = self.broker_client.get_current_price(symbol)
+            self.logger.log_info(
+                f"Current price for {symbol}: ${current_price:.2f}",
+                {"symbol": symbol, "price": current_price, "strategy": "short_strangle"}
+            )
+            
+            # Calculate expiration
+            expiration = self.short_strangle_calculator.calculate_expiration()
+            
+            # Get number of contracts
+            num_contracts = self.config.ss_num_contracts
+            
+            # Calculate target strikes
+            put_strike_target = self.short_strangle_calculator.calculate_put_strike(current_price)
+            call_strike_target = self.short_strangle_calculator.calculate_call_strike(current_price)
+            
+            self.logger.log_info(
+                f"Short Strangle targets for {symbol}",
+                {
+                    "symbol": symbol,
+                    "put_target": f"${put_strike_target:.2f}",
+                    "call_target": f"${call_strike_target:.2f}",
+                    "expiration": expiration.isoformat(),
+                    "num_contracts": num_contracts,
+                    "warning": "UNDEFINED RISK STRATEGY"
+                }
+            )
+            
+            # Get option chain
+            self.logger.log_info(f"Retrieving option chain for {symbol}")
+            option_chain = self.broker_client.get_option_chain(symbol, expiration)
+            available_strikes = sorted(list(set([contract.strike for contract in option_chain])))
+            
+            self.logger.log_info(
+                f"Retrieved {len(available_strikes)} available strikes for {symbol}",
+                {"symbol": symbol, "strike_count": len(available_strikes)}
+            )
+            
+            # Find actual strikes
+            put_strike = self.short_strangle_calculator.find_nearest_strike_below(
+                put_strike_target, available_strikes
+            )
+            call_strike = self.short_strangle_calculator.find_nearest_strike_above(
+                call_strike_target, available_strikes
+            )
+            
+            profit_range = call_strike - put_strike
+            
+            self.logger.log_info(
+                f"Selected short strangle strikes for {symbol}",
+                {
+                    "symbol": symbol,
+                    "put_strike": f"${put_strike:.2f}",
+                    "call_strike": f"${call_strike:.2f}",
+                    "profit_range": f"${profit_range:.2f}",
+                    "expiration": expiration.isoformat()
+                }
+            )
+            
+            # Submit short strangle order
+            self.logger.log_info(f"Submitting short strangle order for {symbol}")
+            order_result = self.broker_client.submit_short_strangle_order(
+                symbol=symbol,
+                put_strike=put_strike,
+                call_strike=call_strike,
+                expiration=expiration,
+                num_contracts=num_contracts
+            )
+            
+            if order_result.success:
+                return TradeResult(
+                    symbol=symbol,
+                    success=True,
+                    order_id=order_result.order_id,
+                    short_strike=call_strike,  # Call strike (one of the shorts)
+                    long_strike=put_strike,    # Put strike (other short)
+                    expiration=expiration,
+                    quantity=num_contracts,
+                    filled_price=None,
+                    error_message=None,
+                    timestamp=timestamp
+                )
+            else:
+                return TradeResult(
+                    symbol=symbol,
+                    success=False,
+                    order_id=None,
+                    short_strike=call_strike,
+                    long_strike=put_strike,
+                    expiration=expiration,
+                    quantity=num_contracts,
+                    filled_price=None,
+                    error_message=order_result.error_message,
+                    timestamp=timestamp
+                )
+            
+        except Exception as e:
+            error_msg = f"Unexpected error: {type(e).__name__}: {str(e)}"
+            self.logger.log_error(
+                f"Unexpected error processing short strangle for {symbol}",
                 e,
                 {
                     "symbol": symbol,
