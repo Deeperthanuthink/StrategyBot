@@ -25,6 +25,9 @@ from src.strategy.collar_strategy import (
     ShortStrangleCalculator,
     IronCondorCalculator,
 )
+from src.strategy.tiered_covered_call_strategy import TieredCoveredCallCalculator
+from src.strategy.covered_call_roller import CoveredCallRoller
+from src.positions.position_service import PositionService
 from src.order.order_manager import OrderManager, TradeResult
 from src.logging.bot_logger import BotLogger
 
@@ -58,6 +61,9 @@ class TradingBot:
         self.broker_client: Optional[BaseBrokerClient] = None
         self.strategy_calculator: Optional[StrategyCalculator] = None
         self.collar_calculator: Optional[CollarCalculator] = None
+        self.tiered_cc_calculator: Optional[TieredCoveredCallCalculator] = None
+        self.covered_call_roller: Optional[CoveredCallRoller] = None
+        self.position_service: Optional[PositionService] = None
         self.order_manager: Optional[OrderManager] = None
         self._initialized = False
 
@@ -177,6 +183,28 @@ class TradingBot:
                 expiration_days=self.config.ic_expiration_days,
                 num_contracts=self.config.ic_num_contracts,
             )
+            
+            # Initialize tiered covered call calculator
+            self.tiered_cc_calculator = TieredCoveredCallCalculator(
+                broker_client=self.broker_client,
+                min_days_to_expiration=self.config.tcc_min_days_to_expiration,
+                max_days_to_expiration=self.config.tcc_max_days_to_expiration
+            )
+            
+            # Initialize covered call roller
+            self.covered_call_roller = CoveredCallRoller(
+                broker_client=self.broker_client,
+                logger=self.logger if self.logger else None,
+                min_roll_credit=self.config.tcc_min_roll_credit,
+                max_roll_days_out=self.config.tcc_max_roll_days_out
+            )
+            
+            # Initialize position service
+            self.position_service = PositionService(
+                broker_client=self.broker_client,
+                logger=self.logger if self.logger else None
+            )
+            
             strategy_names = {
                 "pc": "Protected Collar",
                 "pcs": "Put Credit Spread",
@@ -191,6 +219,7 @@ class TradingBot:
                 "ib": "Iron Butterfly",
                 "ss": "Short Strangle",
                 "ic": "Iron Condor",
+                "tcc": "Tiered Covered Calls",
             }
             strategy_name = strategy_names.get(self.config.strategy, "Unknown")
             self.logger.log_info(
@@ -380,6 +409,8 @@ class TradingBot:
                     trade_result = self.process_short_strangle_symbol(symbol)
                 elif self.config.strategy == "ic":  # Iron Condor
                     trade_result = self.process_iron_condor_symbol(symbol)
+                elif self.config.strategy == "tcc":  # Tiered Covered Calls
+                    trade_result = self.process_tiered_covered_calls(symbol)
                 else:  # pcs = Put Credit Spread (default)
                     trade_result = self.process_symbol(symbol)
 
@@ -411,6 +442,23 @@ class TradingBot:
                     timestamp=datetime.now(),
                 )
                 trade_results.append(failed_result)
+
+        # Check for covered call rolling opportunities if enabled
+        if self.config.tcc_roll_enabled:
+            try:
+                roll_results = self._check_and_execute_rolls()
+                if roll_results:
+                    trade_results.extend(roll_results)
+                    self.logger.log_info(
+                        f"Processed {len(roll_results)} roll opportunities",
+                        {"roll_count": len(roll_results)}
+                    )
+            except Exception as e:
+                self.logger.log_error(
+                    "Error during roll processing",
+                    e,
+                    {"error_type": type(e).__name__}
+                )
 
         # Calculate summary statistics
         successful_trades = sum(1 for result in trade_results if result.success)
@@ -2363,6 +2411,251 @@ class TradingBot:
                 timestamp=timestamp,
             )
 
+    def process_tiered_covered_calls(self, symbol: str) -> TradeResult:
+        """Process a single symbol using Tiered Covered Calls strategy.
+
+        Tiered Covered Calls strategy:
+        1. Queries current long positions for the symbol
+        2. Divides available shares into three groups
+        3. Sells covered calls across three different expirations with incrementally higher strikes
+        4. Executes all orders simultaneously
+
+        Args:
+            symbol: Stock symbol to process
+
+        Returns:
+            TradeResult with execution details
+        """
+        timestamp = datetime.now()
+
+        try:
+            self.logger.log_info(f"Starting tiered covered calls strategy for {symbol}")
+
+            # Get position summary
+            position_summary = self.position_service.get_long_positions(symbol)
+            
+            # Validate minimum shares requirement
+            if position_summary.available_shares < self.config.tcc_min_shares_required:
+                error_msg = f"Insufficient shares: need {self.config.tcc_min_shares_required}, have {position_summary.available_shares}"
+                self.logger.log_warning(
+                    f"Cannot execute tiered covered calls for {symbol}: {error_msg}",
+                    {
+                        "symbol": symbol,
+                        "available_shares": position_summary.available_shares,
+                        "required_shares": self.config.tcc_min_shares_required
+                    }
+                )
+                return TradeResult(
+                    symbol=symbol,
+                    success=False,
+                    order_id=None,
+                    short_strike=0.0,
+                    long_strike=0.0,
+                    expiration=date.today(),
+                    quantity=0,
+                    filled_price=None,
+                    error_message=error_msg,
+                    timestamp=timestamp,
+                )
+
+            self.logger.log_info(
+                f"Position summary for {symbol}",
+                {
+                    "symbol": symbol,
+                    "total_shares": position_summary.total_shares,
+                    "available_shares": position_summary.available_shares,
+                    "current_price": f"${position_summary.current_price:.2f}"
+                }
+            )
+
+            # Calculate tiered strategy plan
+            strategy_plan = self.tiered_cc_calculator.calculate_strategy(position_summary)
+            
+            self.logger.log_info(
+                f"Tiered strategy plan for {symbol}",
+                {
+                    "symbol": symbol,
+                    "total_contracts": strategy_plan.total_contracts,
+                    "estimated_premium": f"${strategy_plan.estimated_premium:.2f}",
+                    "expiration_groups": len(strategy_plan.expiration_groups)
+                }
+            )
+
+            # Log details of each expiration group
+            for i, group in enumerate(strategy_plan.expiration_groups):
+                self.logger.log_info(
+                    f"Group {i+1}: {group.num_contracts} contracts @ ${group.strike_price:.2f}, exp {group.expiration_date}",
+                    {
+                        "group": i+1,
+                        "expiration": group.expiration_date.isoformat(),
+                        "strike": group.strike_price,
+                        "contracts": group.num_contracts,
+                        "shares_used": group.shares_used,
+                        "estimated_premium": f"${group.estimated_premium_per_contract:.2f}"
+                    }
+                )
+
+            # Create covered call orders for each expiration group
+            covered_call_orders = []
+            for group in strategy_plan.expiration_groups:
+                # Validate contract limit
+                if group.num_contracts > self.config.tcc_max_contracts_per_expiration:
+                    self.logger.log_warning(
+                        f"Reducing contracts for {symbol} group from {group.num_contracts} to {self.config.tcc_max_contracts_per_expiration} (safety limit)",
+                        {
+                            "symbol": symbol,
+                            "original_contracts": group.num_contracts,
+                            "limited_contracts": self.config.tcc_max_contracts_per_expiration
+                        }
+                    )
+                    group.num_contracts = self.config.tcc_max_contracts_per_expiration
+
+                # Create covered call order for this group
+                order = {
+                    "symbol": symbol,
+                    "strike": group.strike_price,
+                    "expiration": group.expiration_date,
+                    "quantity": group.num_contracts
+                }
+                covered_call_orders.append(order)
+
+            # Submit all covered call orders
+            self.logger.log_info(f"Submitting {len(covered_call_orders)} covered call orders for {symbol}")
+            
+            # For now, submit orders individually since we don't have batch submission implemented
+            # This will be enhanced when the broker clients support batch submission
+            successful_orders = 0
+            failed_orders = 0
+            order_ids = []
+            total_contracts = 0
+            
+            for i, order in enumerate(covered_call_orders):
+                try:
+                    self.logger.log_info(
+                        f"Submitting order {i+1}/{len(covered_call_orders)} for {symbol}",
+                        {
+                            "symbol": order["symbol"],
+                            "strike": f"${order['strike']:.2f}",
+                            "expiration": order["expiration"].isoformat(),
+                            "quantity": order["quantity"]
+                        }
+                    )
+                    
+                    order_result = self.broker_client.submit_covered_call_order(
+                        symbol=order["symbol"],
+                        call_strike=order["strike"],
+                        expiration=order["expiration"],
+                        num_contracts=order["quantity"]
+                    )
+                    
+                    if order_result.success:
+                        successful_orders += 1
+                        total_contracts += order["quantity"]
+                        if order_result.order_id:
+                            order_ids.append(order_result.order_id)
+                        self.logger.log_info(
+                            f"Order {i+1} successful for {symbol}",
+                            {"order_id": order_result.order_id}
+                        )
+                    else:
+                        failed_orders += 1
+                        self.logger.log_error(
+                            f"Order {i+1} failed for {symbol}: {order_result.error_message}",
+                            context={"error": order_result.error_message}
+                        )
+                        
+                except Exception as order_error:
+                    failed_orders += 1
+                    self.logger.log_error(
+                        f"Exception submitting order {i+1} for {symbol}",
+                        order_error,
+                        {"order_index": i+1, "error": str(order_error)}
+                    )
+
+            # Determine overall success
+            overall_success = successful_orders > 0
+            
+            # Create consolidated order ID
+            consolidated_order_id = ",".join(order_ids) if order_ids else None
+            
+            # Use the first expiration group for the main trade result
+            primary_group = strategy_plan.expiration_groups[0] if strategy_plan.expiration_groups else None
+            
+            result_message = None
+            if failed_orders > 0:
+                result_message = f"Partial success: {successful_orders}/{len(covered_call_orders)} orders succeeded"
+
+            self.logger.log_info(
+                f"Tiered covered calls execution complete for {symbol}",
+                {
+                    "symbol": symbol,
+                    "successful_orders": successful_orders,
+                    "failed_orders": failed_orders,
+                    "total_contracts": total_contracts,
+                    "overall_success": overall_success
+                }
+            )
+
+            return TradeResult(
+                symbol=symbol,
+                success=overall_success,
+                order_id=consolidated_order_id,
+                short_strike=primary_group.strike_price if primary_group else 0.0,
+                long_strike=0.0,  # Covered calls don't have long strikes
+                expiration=primary_group.expiration_date if primary_group else date.today(),
+                quantity=total_contracts,
+                filled_price=None,
+                error_message=result_message,
+                timestamp=timestamp,
+            )
+
+        except ValueError as e:
+            # Handle validation errors (insufficient shares, no expirations, etc.)
+            error_msg = f"Strategy validation error: {str(e)}"
+            self.logger.log_warning(
+                f"Tiered covered calls validation failed for {symbol}: {error_msg}",
+                {"symbol": symbol, "error": error_msg}
+            )
+            
+            return TradeResult(
+                symbol=symbol,
+                success=False,
+                order_id=None,
+                short_strike=0.0,
+                long_strike=0.0,
+                expiration=date.today(),
+                quantity=0,
+                filled_price=None,
+                error_message=error_msg,
+                timestamp=timestamp,
+            )
+
+        except Exception as e:
+            # Handle unexpected errors
+            error_msg = f"Unexpected error: {type(e).__name__}: {str(e)}"
+            self.logger.log_error(
+                f"Unexpected error processing tiered covered calls for {symbol}",
+                e,
+                {
+                    "symbol": symbol,
+                    "error_type": type(e).__name__,
+                    "timestamp": timestamp.isoformat(),
+                },
+            )
+
+            return TradeResult(
+                symbol=symbol,
+                success=False,
+                order_id=None,
+                short_strike=0.0,
+                long_strike=0.0,
+                expiration=date.today(),
+                quantity=0,
+                filled_price=None,
+                error_message=error_msg,
+                timestamp=timestamp,
+            )
+
     def _log_execution_summary(self, summary: ExecutionSummary):
         """Log execution summary with success/failure counts and detailed report.
 
@@ -2447,6 +2740,222 @@ class TradingBot:
                 f"Failed symbols: {', '.join(failed_symbols)}",
                 {"failed_symbols": failed_symbols},
             )
+
+    def _check_and_execute_rolls(self) -> List[TradeResult]:
+        """Check for roll opportunities and execute them if conditions are met.
+        
+        This method:
+        1. Checks if it's the right time to execute rolls (based on configuration)
+        2. Identifies expiring ITM calls across all symbols
+        3. Calculates roll opportunities
+        4. Executes rolls if profitable
+        
+        Returns:
+            List of TradeResult objects for executed rolls
+        """
+        from datetime import datetime, time
+        
+        # Check if it's the right time to execute rolls
+        current_time = datetime.now().time()
+        roll_time = time.fromisoformat(self.config.tcc_roll_execution_time)
+        
+        # Allow a 30-minute window around the configured time
+        time_diff = abs((current_time.hour * 60 + current_time.minute) - 
+                       (roll_time.hour * 60 + roll_time.minute))
+        
+        if time_diff > 30:  # More than 30 minutes away from roll time
+            self.logger.log_info(
+                f"Not roll execution time. Current: {current_time.strftime('%H:%M')}, "
+                f"Configured: {self.config.tcc_roll_execution_time}",
+                {
+                    "current_time": current_time.strftime('%H:%M'),
+                    "roll_time": self.config.tcc_roll_execution_time,
+                    "time_diff_minutes": time_diff
+                }
+            )
+            return []
+        
+        self.logger.log_info(
+            f"Roll execution time reached. Checking for roll opportunities...",
+            {"roll_time": self.config.tcc_roll_execution_time}
+        )
+        
+        return self.process_covered_call_rolls()
+
+    def process_covered_call_rolls(self, symbol: str = None) -> List[TradeResult]:
+        """Process covered call rolls for expiring ITM calls.
+        
+        This method:
+        1. Identifies expiring ITM calls (portfolio-wide or for specific symbol)
+        2. Calculates roll opportunities
+        3. Executes profitable rolls
+        
+        Args:
+            symbol: Optional specific symbol to check. If None, checks all symbols.
+            
+        Returns:
+            List of TradeResult objects for executed rolls
+        """
+        timestamp = datetime.now()
+        roll_results = []
+        
+        try:
+            self.logger.log_info(
+                f"Starting covered call roll processing" + 
+                (f" for {symbol}" if symbol else " (portfolio-wide)")
+            )
+            
+            # Identify expiring ITM calls
+            expiring_calls = self.covered_call_roller.identify_expiring_itm_calls(symbol)
+            
+            if not expiring_calls:
+                self.logger.log_info(
+                    "No expiring ITM calls found" + 
+                    (f" for {symbol}" if symbol else " in portfolio"),
+                    {"symbol": symbol, "expiring_calls_count": 0}
+                )
+                return []
+            
+            self.logger.log_info(
+                f"Found {len(expiring_calls)} expiring ITM call(s)" +
+                (f" for {symbol}" if symbol else " in portfolio"),
+                {
+                    "symbol": symbol,
+                    "expiring_calls_count": len(expiring_calls),
+                    "calls": [
+                        {
+                            "symbol": call.symbol,
+                            "strike": call.strike,
+                            "expiration": call.expiration.isoformat(),
+                            "quantity": call.quantity
+                        }
+                        for call in expiring_calls
+                    ]
+                }
+            )
+            
+            # Calculate roll opportunities
+            roll_opportunities = self.covered_call_roller.calculate_roll_opportunities(expiring_calls)
+            
+            if not roll_opportunities:
+                self.logger.log_info(
+                    "No profitable roll opportunities found",
+                    {"expiring_calls": len(expiring_calls)}
+                )
+                return []
+            
+            self.logger.log_info(
+                f"Found {len(roll_opportunities)} profitable roll opportunity(ies)",
+                {
+                    "roll_opportunities_count": len(roll_opportunities),
+                    "opportunities": [
+                        {
+                            "symbol": opp.symbol,
+                            "current_strike": opp.current_call.strike,
+                            "current_expiration": opp.current_call.expiration.isoformat(),
+                            "target_strike": opp.target_strike,
+                            "target_expiration": opp.target_expiration.isoformat(),
+                            "estimated_credit": f"${opp.estimated_credit:.2f}"
+                        }
+                        for opp in roll_opportunities
+                    ]
+                }
+            )
+            
+            # Create roll plan
+            from src.strategy.covered_call_roller import RollPlan
+            roll_plan = RollPlan(
+                symbol=symbol or "PORTFOLIO",
+                current_price=0.0,  # Will be set per opportunity
+                roll_opportunities=roll_opportunities,
+                total_estimated_credit=sum(opp.estimated_credit for opp in roll_opportunities),
+                execution_time=timestamp,
+                cumulative_premium_collected=0.0,  # Will be calculated by roller
+                cost_basis_impact=0.0  # Will be calculated by roller
+            )
+            
+            # Execute roll plan
+            order_results = self.covered_call_roller.execute_roll_plan(roll_plan)
+            
+            # Convert order results to trade results
+            for order_result in order_results:
+                if hasattr(order_result, 'roll_order'):
+                    roll_order = order_result.roll_order
+                    trade_result = TradeResult(
+                        symbol=roll_order.symbol,
+                        success=order_result.success,
+                        order_id=getattr(order_result, 'order_id', None),
+                        short_strike=roll_order.open_strike,
+                        long_strike=roll_order.close_strike,
+                        expiration=roll_order.open_expiration,
+                        quantity=roll_order.quantity,
+                        filled_price=getattr(order_result, 'actual_credit', None),
+                        error_message=getattr(order_result, 'error_message', None),
+                        timestamp=timestamp,
+                    )
+                    roll_results.append(trade_result)
+                    
+                    if order_result.success:
+                        self.logger.log_info(
+                            f"Roll executed successfully for {roll_order.symbol}",
+                            {
+                                "symbol": roll_order.symbol,
+                                "from_strike": roll_order.close_strike,
+                                "to_strike": roll_order.open_strike,
+                                "from_expiration": roll_order.close_expiration.isoformat(),
+                                "to_expiration": roll_order.open_expiration.isoformat(),
+                                "credit": f"${order_result.actual_credit:.2f}" if hasattr(order_result, 'actual_credit') else "N/A"
+                            }
+                        )
+                    else:
+                        self.logger.log_error(
+                            f"Roll failed for {roll_order.symbol}",
+                            context={
+                                "symbol": roll_order.symbol,
+                                "error": getattr(order_result, 'error_message', 'Unknown error')
+                            }
+                        )
+            
+            successful_rolls = sum(1 for result in roll_results if result.success)
+            total_rolls = len(roll_results)
+            
+            self.logger.log_info(
+                f"Roll processing complete: {successful_rolls}/{total_rolls} successful",
+                {
+                    "successful_rolls": successful_rolls,
+                    "total_rolls": total_rolls,
+                    "total_estimated_credit": f"${roll_plan.total_estimated_credit:.2f}"
+                }
+            )
+            
+            return roll_results
+            
+        except Exception as e:
+            error_msg = f"Unexpected error during roll processing: {type(e).__name__}: {str(e)}"
+            self.logger.log_error(
+                "Roll processing failed",
+                e,
+                {
+                    "symbol": symbol,
+                    "error_type": type(e).__name__,
+                    "timestamp": timestamp.isoformat(),
+                }
+            )
+            
+            # Return a failed trade result
+            failed_result = TradeResult(
+                symbol=symbol or "PORTFOLIO",
+                success=False,
+                order_id=None,
+                short_strike=0.0,
+                long_strike=0.0,
+                expiration=date.today(),
+                quantity=0,
+                filled_price=None,
+                error_message=error_msg,
+                timestamp=timestamp,
+            )
+            return [failed_result]
 
     def shutdown(self):
         """Perform graceful shutdown and cleanup.

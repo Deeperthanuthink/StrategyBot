@@ -95,6 +95,19 @@
       "spread_width": 5.0,
       "expiration_days": 30,
       "num_contracts": 1
+    },
+    "tcc": {
+      "name": "Tiered Covered Calls",
+      "min_shares_required": 300,
+      "max_contracts_per_expiration": 10,
+      "min_days_to_expiration": 7,
+      "max_days_to_expiration": 60,
+      "strike_increment_minimum": 2.50,
+      "premium_threshold_per_contract": 0.50,
+      "roll_enabled": true,
+      "roll_execution_time": "15:30",
+      "min_roll_credit": 0.10,
+      "max_roll_days_out": 45
     }
   },
   "brokers": {

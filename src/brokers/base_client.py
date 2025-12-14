@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from datetime import datetime, date
-from typing import List, Optional
+from typing import List, Optional, Dict
 from dataclasses import dataclass
 
 
@@ -58,6 +58,61 @@ class Position:
     avg_cost: float
     current_price: float
     market_value: float
+
+
+@dataclass
+class DetailedPosition:
+    """Represents a detailed position in a security."""
+    symbol: str
+    quantity: int
+    market_value: float
+    average_cost: float
+    unrealized_pnl: float
+    position_type: str  # 'stock', 'long_call', 'long_put', 'short_call', 'short_put'
+
+
+@dataclass
+class CoveredCallOrder:
+    """Represents a covered call order specification."""
+    symbol: str
+    strike: float
+    expiration: date
+    quantity: int
+    underlying_shares: int
+
+
+@dataclass
+class OptionPosition:
+    """Represents an option position."""
+    symbol: str
+    strike: float
+    expiration: date
+    option_type: str  # 'call' or 'put'
+    quantity: int
+    market_value: float
+    average_cost: float
+
+
+@dataclass
+class RollOrder:
+    """Represents a roll order with both close and open legs."""
+    symbol: str
+    close_strike: float
+    close_expiration: date
+    open_strike: float
+    open_expiration: date
+    quantity: int
+    estimated_credit: float
+
+
+@dataclass
+class RollOrderResult:
+    """Result of a roll order execution."""
+    roll_order: RollOrder
+    close_result: OrderResult
+    open_result: OrderResult
+    actual_credit: float
+    success: bool
 
 
 class BaseBrokerClient(ABC):
@@ -392,5 +447,67 @@ class BaseBrokerClient(ABC):
 
         Returns:
             OrderResult with order ID and status
+        """
+        pass
+
+    @abstractmethod
+    def get_detailed_positions(self, symbol: str = None) -> List[DetailedPosition]:
+        """Get detailed positions for all symbols or a specific symbol.
+
+        Args:
+            symbol: Optional stock symbol to filter positions. If None, returns all positions.
+
+        Returns:
+            List of DetailedPosition objects with comprehensive position information
+        """
+        pass
+
+    @abstractmethod
+    def get_option_chain_multiple_expirations(self, symbol: str, expirations: List[date]) -> Dict[date, List[OptionContract]]:
+        """Get option chains for multiple expiration dates in a single call.
+
+        Args:
+            symbol: Stock symbol
+            expirations: List of expiration dates to retrieve option chains for
+
+        Returns:
+            Dictionary mapping expiration dates to lists of OptionContract objects
+        """
+        pass
+
+    @abstractmethod
+    def submit_multiple_covered_call_orders(self, orders: List[CoveredCallOrder]) -> List[OrderResult]:
+        """Submit multiple covered call orders in batch.
+
+        Args:
+            orders: List of CoveredCallOrder objects to submit
+
+        Returns:
+            List of OrderResult objects corresponding to each order
+        """
+        pass
+
+    @abstractmethod
+    def submit_roll_order(self, roll_order: RollOrder) -> RollOrderResult:
+        """Submit a roll order (close existing position and open new position).
+
+        Args:
+            roll_order: RollOrder object with close and open order details
+
+        Returns:
+            RollOrderResult with execution details for both legs
+        """
+        pass
+
+    @abstractmethod
+    def get_expiring_short_calls(self, expiration_date: date, symbol: str = None) -> List[OptionPosition]:
+        """Get short call positions expiring on a specific date.
+
+        Args:
+            expiration_date: Date to filter expiring positions
+            symbol: Optional stock symbol to filter positions
+
+        Returns:
+            List of OptionPosition objects representing expiring short calls
         """
         pass

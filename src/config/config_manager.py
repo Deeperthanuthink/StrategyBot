@@ -90,6 +90,7 @@ class ConfigManager:
         ib_config = strategies.get("ib", {})
         ss_config = strategies.get("ss", {})
         ic_config = strategies.get("ic", {})
+        tcc_config = strategies.get("tcc", {})
 
         # Create main config with type conversion error handling
         try:
@@ -166,6 +167,17 @@ class ConfigManager:
                 ic_spread_width=float(ic_config.get("spread_width", 5.0)),
                 ic_expiration_days=int(ic_config.get("expiration_days", 30)),
                 ic_num_contracts=int(ic_config.get("num_contracts", 1)),
+                # Tiered Covered Calls settings
+                tcc_min_shares_required=int(tcc_config.get("min_shares_required", 300)),
+                tcc_max_contracts_per_expiration=int(tcc_config.get("max_contracts_per_expiration", 10)),
+                tcc_min_days_to_expiration=int(tcc_config.get("min_days_to_expiration", 7)),
+                tcc_max_days_to_expiration=int(tcc_config.get("max_days_to_expiration", 60)),
+                tcc_strike_increment_minimum=float(tcc_config.get("strike_increment_minimum", 2.50)),
+                tcc_premium_threshold_per_contract=float(tcc_config.get("premium_threshold_per_contract", 0.50)),
+                tcc_roll_enabled=bool(tcc_config.get("roll_enabled", True)),
+                tcc_roll_execution_time=str(tcc_config.get("roll_execution_time", "15:30")),
+                tcc_min_roll_credit=float(tcc_config.get("min_roll_credit", 0.10)),
+                tcc_max_roll_days_out=int(tcc_config.get("max_roll_days_out", 45)),
             )
         except (ValueError, TypeError) as e:
             raise ValueError(

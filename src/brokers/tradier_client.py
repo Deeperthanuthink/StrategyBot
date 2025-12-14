@@ -1,7 +1,7 @@
 """Tradier broker client using Lumibot."""
 
 from datetime import datetime, date, timedelta
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from lumibot.brokers import Tradier
 from lumibot.entities import Asset
@@ -14,6 +14,11 @@ from .base_client import (
     OrderResult,
     AccountInfo,
     Position,
+    DetailedPosition,
+    CoveredCallOrder,
+    OptionPosition,
+    RollOrder,
+    RollOrderResult,
 )
 
 
@@ -121,23 +126,34 @@ class TradierClient(BaseBrokerClient):
         for strike in range(500, 1500, 10):
             strikes.append(float(strike))
 
-        # Create option contracts
-        put_options = []
+        # Create option contracts for both calls and puts
+        options = []
         exp_str = expiration.strftime("%y%m%d")
 
         for strike in strikes:
             strike_str = f"{int(strike * 1000):08d}"
-            option_symbol = f"{symbol}{exp_str}P{strike_str}"
-
-            contract = OptionContract(
-                symbol=option_symbol,
+            
+            # Create call option
+            call_symbol = f"{symbol}{exp_str}C{strike_str}"
+            call_contract = OptionContract(
+                symbol=call_symbol,
+                strike=strike,
+                expiration=expiration,
+                option_type="call",
+            )
+            options.append(call_contract)
+            
+            # Create put option
+            put_symbol = f"{symbol}{exp_str}P{strike_str}"
+            put_contract = OptionContract(
+                symbol=put_symbol,
                 strike=strike,
                 expiration=expiration,
                 option_type="put",
             )
-            put_options.append(contract)
+            options.append(put_contract)
 
-        return put_options
+        return options
 
     def get_framework_info(self) -> dict:
         """Get information about the trading framework being used.
@@ -288,14 +304,14 @@ class TradierClient(BaseBrokerClient):
             raise
 
     def get_option_chain(self, symbol: str, expiration: date) -> List[OptionContract]:
-        """Get option chain for a symbol and expiration date, filtered for put options.
+        """Get option chain for a symbol and expiration date, including both calls and puts.
 
         Args:
             symbol: Stock symbol (e.g., 'AAPL')
             expiration: Option expiration date
 
         Returns:
-            List of OptionContract objects for put options
+            List of OptionContract objects for both call and put options
 
         Raises:
             ValueError: If option chain is unavailable
@@ -310,13 +326,29 @@ class TradierClient(BaseBrokerClient):
             if not chains:
                 raise ValueError(f"No option chains available for {symbol}")
 
-            # Filter for the specific expiration date and put options
+            # Filter for the specific expiration date and get both calls and puts
             expiration_str = expiration.strftime("%Y-%m-%d")
-            put_options = []
+            options = []
 
             for chain in chains:
                 # Check if this chain matches our expiration
                 if hasattr(chain, "expiration") and str(chain.expiration) == expiration_str:
+                    # Get strikes for calls
+                    if hasattr(chain, "calls") and chain.calls:
+                        for strike in chain.calls:
+                            # Create option symbol in OCC format
+                            exp_str = expiration.strftime("%y%m%d")
+                            strike_str = f"{int(strike * 1000):08d}"
+                            option_symbol = f"{symbol}{exp_str}C{strike_str}"
+
+                            contract = OptionContract(
+                                symbol=option_symbol,
+                                strike=float(strike),
+                                expiration=expiration,
+                                option_type="call",
+                            )
+                            options.append(contract)
+                    
                     # Get strikes for puts
                     if hasattr(chain, "puts") and chain.puts:
                         for strike in chain.puts:
@@ -331,35 +363,39 @@ class TradierClient(BaseBrokerClient):
                                 expiration=expiration,
                                 option_type="put",
                             )
-                            put_options.append(contract)
+                            options.append(contract)
 
-            if not put_options:
+            if not options:
                 if self.logger:
                     self.logger.log_warning(
-                        f"No put options from API for {symbol} - generating synthetic strikes (market may be closed)",
+                        f"No options from API for {symbol} - generating synthetic strikes (market may be closed)",
                         {"symbol": symbol, "expiration": expiration_str},
                     )
 
                 # Generate synthetic option chain when real data unavailable
-                put_options = self._generate_synthetic_strikes(symbol, expiration)
+                options = self._generate_synthetic_strikes(symbol, expiration)
 
                 if self.logger:
                     self.logger.log_info(
-                        f"Generated {len(put_options)} synthetic strikes for {symbol}",
-                        {"symbol": symbol, "strike_count": len(put_options)},
+                        f"Generated {len(options)} synthetic strikes for {symbol}",
+                        {"symbol": symbol, "strike_count": len(options)},
                     )
 
             if self.logger:
+                call_count = len([opt for opt in options if opt.option_type == "call"])
+                put_count = len([opt for opt in options if opt.option_type == "put"])
                 self.logger.log_info(
                     f"Retrieved option chain for {symbol}",
                     {
                         "symbol": symbol,
                         "expiration": expiration_str,
-                        "put_count": len(put_options),
+                        "call_count": call_count,
+                        "put_count": put_count,
+                        "total_count": len(options),
                     },
                 )
 
-            return put_options
+            return options
 
         except ValueError:
             raise
@@ -1850,3 +1886,663 @@ class TradierClient(BaseBrokerClient):
             return OrderResult(
                 success=False, order_id=None, status="error", error_message=str(e)
             )
+
+    def get_detailed_positions(self, symbol: str = None) -> List[DetailedPosition]:
+        """Get detailed positions for all symbols or a specific symbol using Tradier API.
+
+        Args:
+            symbol: Optional stock symbol to filter positions. If None, returns all positions.
+
+        Returns:
+            List of DetailedPosition objects with comprehensive position information
+        """
+        try:
+            import requests
+
+            base_url = (
+                "https://sandbox.tradier.com" if self.is_sandbox else "https://api.tradier.com"
+            )
+
+            response = requests.get(
+                f"{base_url}/v1/accounts/{self.account_id}/positions",
+                headers={
+                    "Authorization": f"Bearer {self.api_token}",
+                    "Accept": "application/json",
+                },
+            )
+
+            detailed_positions = []
+
+            if response.status_code == 200:
+                data = response.json()
+                positions_data = data.get("positions", {})
+
+                if positions_data == "null" or not positions_data:
+                    if self.logger:
+                        self.logger.log_info("No positions found")
+                    return []
+
+                position_list = positions_data.get("position", [])
+
+                # Handle single position (not a list)
+                if isinstance(position_list, dict):
+                    position_list = [position_list]
+
+                for pos in position_list:
+                    pos_symbol = pos.get("symbol", "")
+                    quantity = int(pos.get("quantity", 0))
+                    
+                    # Determine position type and parse option details
+                    position_type = "stock"
+                    is_option = False
+                    option_type = None
+                    strike = None
+                    expiration_date = None
+                    underlying_symbol = pos_symbol
+                    
+                    # Parse option symbol (OCC format: SYMBOL + YYMMDD + C/P + Strike)
+                    # Example: TLT250117C00100000 = TLT Call expiring 2025-01-17 at strike 100
+                    if len(pos_symbol) > 6:  # Likely an option symbol
+                        try:
+                            # Extract underlying symbol (first part before date)
+                            # Option symbols are typically: SYMBOL(1-5 chars) + YYMMDD(6 chars) + C/P(1 char) + STRIKE(8 chars)
+                            if len(pos_symbol) >= 15:  # Minimum length for option symbol
+                                # Find the date portion (6 digits)
+                                for i in range(len(pos_symbol) - 14):
+                                    date_str = pos_symbol[i:i+6]
+                                    if date_str.isdigit():
+                                        underlying_symbol = pos_symbol[:i]
+                                        
+                                        # Parse expiration date (YYMMDD)
+                                        year = 2000 + int(date_str[0:2])
+                                        month = int(date_str[2:4])
+                                        day = int(date_str[4:6])
+                                        expiration_date = date(year, month, day)
+                                        
+                                        # Parse option type (C or P)
+                                        option_char = pos_symbol[i+6:i+7]
+                                        if option_char == 'C':
+                                            option_type = 'call'
+                                            position_type = "long_call" if quantity > 0 else "short_call"
+                                            is_option = True
+                                        elif option_char == 'P':
+                                            option_type = 'put'
+                                            position_type = "long_put" if quantity > 0 else "short_put"
+                                            is_option = True
+                                        
+                                        # Parse strike price (8 digits, divide by 1000 for actual price)
+                                        if is_option and len(pos_symbol) >= i+15:
+                                            strike_str = pos_symbol[i+7:i+15]
+                                            if strike_str.isdigit():
+                                                strike = float(strike_str) / 1000.0
+                                        
+                                        break
+                        except Exception as e:
+                            # If parsing fails, treat as stock
+                            if self.logger:
+                                self.logger.log_warning(f"Could not parse option symbol {pos_symbol}: {str(e)}")
+                            is_option = False
+                    
+                    # Filter by underlying symbol if specified
+                    if symbol and underlying_symbol.upper() != symbol.upper():
+                        continue
+
+                    # Create appropriate position object
+                    if is_option and strike is not None and expiration_date is not None:
+                        from src.positions.models import OptionPosition
+                        detailed_position = OptionPosition(
+                            symbol=underlying_symbol,  # Use underlying symbol, not full option symbol
+                            quantity=abs(quantity),  # Use absolute value for quantity
+                            market_value=float(pos.get("market_value", 0) or 0),
+                            average_cost=float(pos.get("cost_basis", 0)) / max(abs(quantity), 1),
+                            unrealized_pnl=float(pos.get("unrealized_pnl", 0) or 0),
+                            position_type=position_type,
+                            strike=strike,
+                            expiration=expiration_date,
+                            option_type=option_type
+                        )
+                    else:
+                        detailed_position = DetailedPosition(
+                            symbol=pos_symbol,
+                            quantity=quantity,
+                            market_value=float(pos.get("market_value", 0) or 0),
+                            average_cost=float(pos.get("cost_basis", 0)) / max(abs(quantity), 1),
+                            unrealized_pnl=float(pos.get("unrealized_pnl", 0) or 0),
+                            position_type=position_type
+                        )
+                    detailed_positions.append(detailed_position)
+
+            if self.logger:
+                filter_msg = f" for {symbol}" if symbol else ""
+                self.logger.log_info(
+                    f"Retrieved {len(detailed_positions)} detailed positions{filter_msg}",
+                    {"position_count": len(detailed_positions), "symbol_filter": symbol}
+                )
+
+            return detailed_positions
+
+        except Exception as e:
+            error_msg = f"Error getting detailed positions: {str(e)}"
+            if self.logger:
+                self.logger.log_error(error_msg, e, {"symbol_filter": symbol})
+            raise RuntimeError(error_msg) from e
+
+    def get_option_chain_multiple_expirations(self, symbol: str, expirations: List[date]) -> Dict[date, List[OptionContract]]:
+        """Get option chains for multiple expiration dates using Tradier API.
+
+        Args:
+            symbol: Stock symbol
+            expirations: List of expiration dates to retrieve option chains for
+
+        Returns:
+            Dictionary mapping expiration dates to lists of OptionContract objects
+        """
+        try:
+            import requests
+            from typing import Dict
+
+            base_url = (
+                "https://sandbox.tradier.com" if self.is_sandbox else "https://api.tradier.com"
+            )
+
+            # Get option chain for the symbol
+            response = requests.get(
+                f"{base_url}/v1/markets/options/chains",
+                params={"symbol": symbol, "greeks": "false"},
+                headers={
+                    "Authorization": f"Bearer {self.api_token}",
+                    "Accept": "application/json",
+                },
+            )
+
+            option_chains = {}
+
+            if response.status_code == 200:
+                data = response.json()
+                options_data = data.get("options", {})
+
+                if options_data and options_data != "null":
+                    option_list = options_data.get("option", [])
+                    
+                    # Handle single option (not a list)
+                    if isinstance(option_list, dict):
+                        option_list = [option_list]
+
+                    # Group options by expiration date
+                    for exp_date in expirations:
+                        exp_str = exp_date.strftime("%Y-%m-%d")
+                        option_chains[exp_date] = []
+
+                        for option in option_list:
+                            if option.get("expiration_date") == exp_str:
+                                # Create option contract
+                                strike = float(option.get("strike", 0))
+                                option_type = option.get("option_type", "").lower()
+                                
+                                # Create option symbol in OCC format
+                                exp_str_occ = exp_date.strftime("%y%m%d")
+                                strike_str = f"{int(strike * 1000):08d}"
+                                option_symbol = f"{symbol}{exp_str_occ}{option_type[0].upper()}{strike_str}"
+
+                                contract = OptionContract(
+                                    symbol=option_symbol,
+                                    strike=strike,
+                                    expiration=exp_date,
+                                    option_type=option_type
+                                )
+                                option_chains[exp_date].append(contract)
+
+            # If no real data available, generate synthetic data for requested expirations
+            for exp_date in expirations:
+                if exp_date not in option_chains or not option_chains[exp_date]:
+                    if self.logger:
+                        self.logger.log_warning(
+                            f"No option data from API for {symbol} {exp_date} - generating synthetic strikes"
+                        )
+                    option_chains[exp_date] = self._generate_synthetic_strikes(symbol, exp_date)
+
+            if self.logger:
+                total_contracts = sum(len(contracts) for contracts in option_chains.values())
+                self.logger.log_info(
+                    f"Retrieved option chains for {symbol}",
+                    {
+                        "symbol": symbol,
+                        "expirations": len(expirations),
+                        "total_contracts": total_contracts
+                    }
+                )
+
+            return option_chains
+
+        except Exception as e:
+            error_msg = f"Error getting option chains for {symbol}: {str(e)}"
+            if self.logger:
+                self.logger.log_error(error_msg, e, {"symbol": symbol, "expirations": len(expirations)})
+            raise RuntimeError(error_msg) from e
+
+    def submit_multiple_covered_call_orders(self, orders: List[CoveredCallOrder]) -> List[OrderResult]:
+        """Submit multiple covered call orders using Tradier API.
+
+        Args:
+            orders: List of CoveredCallOrder objects to submit
+
+        Returns:
+            List of OrderResult objects corresponding to each order
+        """
+        try:
+            import requests
+
+            base_url = (
+                "https://sandbox.tradier.com" if self.is_sandbox else "https://api.tradier.com"
+            )
+
+            results = []
+
+            for order in orders:
+                try:
+                    # Format expiration
+                    expiration_str = order.expiration.strftime("%y%m%d")
+
+                    # Construct option symbol
+                    call_strike_str = f"{int(order.strike * 1000):08d}"
+                    call_symbol = f"{order.symbol}{expiration_str}C{call_strike_str}"
+
+                    # Sell to open call
+                    order_data = {
+                        "class": "option",
+                        "symbol": order.symbol,
+                        "option_symbol": call_symbol,
+                        "side": "sell_to_open",
+                        "quantity": order.quantity,
+                        "type": "market",
+                        "duration": "gtc",
+                    }
+
+                    response = requests.post(
+                        f"{base_url}/v1/accounts/{self.account_id}/orders",
+                        data=order_data,
+                        headers={
+                            "Authorization": f"Bearer {self.api_token}",
+                            "Accept": "application/json",
+                        },
+                    )
+
+                    if response.status_code in [200, 201]:
+                        result_data = response.json()
+                        order_info = result_data.get("order", {})
+                        order_id = order_info.get("id")
+
+                        result = OrderResult(
+                            success=True,
+                            order_id=str(order_id) if order_id else None,
+                            status="submitted",
+                            error_message=None,
+                        )
+
+                        if self.logger:
+                            self.logger.log_info(
+                                f"Successfully submitted covered call order for {order.symbol}",
+                                {
+                                    "symbol": order.symbol,
+                                    "order_id": order_id,
+                                    "strike": order.strike,
+                                    "expiration": order.expiration.isoformat(),
+                                    "quantity": order.quantity,
+                                }
+                            )
+
+                        results.append(result)
+                    else:
+                        error_msg = f"Order rejected: {response.status_code} - {response.text}"
+
+                        result = OrderResult(
+                            success=False,
+                            order_id=None,
+                            status="rejected",
+                            error_message=error_msg,
+                        )
+
+                        if self.logger:
+                            self.logger.log_error(
+                                f"Covered call order rejected for {order.symbol}: {error_msg}",
+                                None,
+                                {"symbol": order.symbol, "response": response.text}
+                            )
+
+                        results.append(result)
+
+                except Exception as order_error:
+                    error_msg = f"Error submitting order for {order.symbol}: {str(order_error)}"
+                    
+                    result = OrderResult(
+                        success=False,
+                        order_id=None,
+                        status="error",
+                        error_message=error_msg,
+                    )
+
+                    if self.logger:
+                        self.logger.log_error(error_msg, order_error, {"symbol": order.symbol})
+
+                    results.append(result)
+
+            # Log batch summary
+            successful_orders = sum(1 for result in results if result.success)
+            if self.logger:
+                self.logger.log_info(
+                    f"Batch covered call submission completed",
+                    {
+                        "total_orders": len(orders),
+                        "successful": successful_orders,
+                        "failed": len(orders) - successful_orders
+                    }
+                )
+
+            return results
+
+        except Exception as e:
+            error_msg = f"Error in batch covered call submission: {str(e)}"
+            if self.logger:
+                self.logger.log_error(error_msg, e, {"order_count": len(orders)})
+            
+            # Return error results for all orders
+            return [
+                OrderResult(
+                    success=False,
+                    order_id=None,
+                    status="error",
+                    error_message=error_msg
+                ) for _ in orders
+            ]
+
+    def submit_roll_order(self, roll_order: RollOrder) -> RollOrderResult:
+        """Submit a roll order using Tradier's combo order functionality.
+
+        Args:
+            roll_order: RollOrder object with close and open order details
+
+        Returns:
+            RollOrderResult with execution details for both legs
+        """
+        try:
+            import requests
+
+            base_url = (
+                "https://sandbox.tradier.com" if self.is_sandbox else "https://api.tradier.com"
+            )
+
+            # Format expirations
+            close_exp_str = roll_order.close_expiration.strftime("%y%m%d")
+            open_exp_str = roll_order.open_expiration.strftime("%y%m%d")
+
+            # Construct option symbols
+            close_strike_str = f"{int(roll_order.close_strike * 1000):08d}"
+            open_strike_str = f"{int(roll_order.open_strike * 1000):08d}"
+
+            close_symbol = f"{roll_order.symbol}{close_exp_str}C{close_strike_str}"
+            open_symbol = f"{roll_order.symbol}{open_exp_str}C{open_strike_str}"
+
+            # Use multileg order for roll (buy-to-close existing, sell-to-open new)
+            order_data = {
+                "class": "multileg",
+                "symbol": roll_order.symbol,
+                "type": "credit",  # We expect to receive a credit
+                "duration": "day",
+                "price": max(0.05, roll_order.estimated_credit * 0.8),  # Set limit at 80% of estimated credit
+                "option_symbol[0]": close_symbol,
+                "side[0]": "buy_to_close",
+                "quantity[0]": roll_order.quantity,
+                "option_symbol[1]": open_symbol,
+                "side[1]": "sell_to_open",
+                "quantity[1]": roll_order.quantity,
+            }
+
+            response = requests.post(
+                f"{base_url}/v1/accounts/{self.account_id}/orders",
+                data=order_data,
+                headers={
+                    "Authorization": f"Bearer {self.api_token}",
+                    "Accept": "application/json",
+                },
+            )
+
+            if response.status_code in [200, 201]:
+                result_data = response.json()
+                order_info = result_data.get("order", {})
+                order_id = order_info.get("id")
+                status = order_info.get("status", "submitted")
+
+                # Create successful results for both legs
+                close_result = OrderResult(
+                    success=True,
+                    order_id=f"{order_id}_close",
+                    status=status,
+                    error_message=None,
+                )
+
+                open_result = OrderResult(
+                    success=True,
+                    order_id=f"{order_id}_open",
+                    status=status,
+                    error_message=None,
+                )
+
+                result = RollOrderResult(
+                    roll_order=roll_order,
+                    close_result=close_result,
+                    open_result=open_result,
+                    actual_credit=roll_order.estimated_credit,  # Actual credit would need to be parsed from fill data
+                    success=True,
+                )
+
+                if self.logger:
+                    self.logger.log_info(
+                        f"Successfully submitted roll order for {roll_order.symbol}",
+                        {
+                            "symbol": roll_order.symbol,
+                            "order_id": order_id,
+                            "close_strike": roll_order.close_strike,
+                            "open_strike": roll_order.open_strike,
+                            "close_expiration": roll_order.close_expiration.isoformat(),
+                            "open_expiration": roll_order.open_expiration.isoformat(),
+                            "quantity": roll_order.quantity,
+                            "estimated_credit": roll_order.estimated_credit,
+                        },
+                    )
+
+                return result
+            else:
+                error_msg = f"Roll order rejected: {response.status_code} - {response.text}"
+
+                # Create failed results for both legs
+                close_result = OrderResult(
+                    success=False,
+                    order_id=None,
+                    status="rejected",
+                    error_message=error_msg,
+                )
+
+                open_result = OrderResult(
+                    success=False,
+                    order_id=None,
+                    status="rejected",
+                    error_message=error_msg,
+                )
+
+                result = RollOrderResult(
+                    roll_order=roll_order,
+                    close_result=close_result,
+                    open_result=open_result,
+                    actual_credit=0.0,
+                    success=False,
+                )
+
+                if self.logger:
+                    self.logger.log_error(
+                        f"Roll order rejected for {roll_order.symbol}: {error_msg}",
+                        None,
+                        {
+                            "symbol": roll_order.symbol,
+                            "response": response.text,
+                            "close_strike": roll_order.close_strike,
+                            "open_strike": roll_order.open_strike,
+                        },
+                    )
+
+                return result
+
+        except Exception as e:
+            error_msg = f"Unexpected error submitting roll order for {roll_order.symbol}: {str(e)}"
+
+            # Create failed results for both legs
+            close_result = OrderResult(
+                success=False,
+                order_id=None,
+                status="error",
+                error_message=error_msg,
+            )
+
+            open_result = OrderResult(
+                success=False,
+                order_id=None,
+                status="error",
+                error_message=error_msg,
+            )
+
+            result = RollOrderResult(
+                roll_order=roll_order,
+                close_result=close_result,
+                open_result=open_result,
+                actual_credit=0.0,
+                success=False,
+            )
+
+            if self.logger:
+                self.logger.log_error(
+                    error_msg,
+                    e,
+                    {
+                        "symbol": roll_order.symbol,
+                        "close_strike": roll_order.close_strike,
+                        "open_strike": roll_order.open_strike,
+                        "error_type": type(e).__name__,
+                    },
+                )
+
+            return result
+
+    def get_expiring_short_calls(self, expiration_date: date, symbol: str = None) -> List[OptionPosition]:
+        """Get short call positions expiring on a specific date using Tradier positions API.
+
+        Args:
+            expiration_date: Date to filter expiring positions
+            symbol: Optional stock symbol to filter positions
+
+        Returns:
+            List of OptionPosition objects representing expiring short calls
+        """
+        try:
+            import requests
+
+            base_url = (
+                "https://sandbox.tradier.com" if self.is_sandbox else "https://api.tradier.com"
+            )
+
+            response = requests.get(
+                f"{base_url}/v1/accounts/{self.account_id}/positions",
+                headers={
+                    "Authorization": f"Bearer {self.api_token}",
+                    "Accept": "application/json",
+                },
+            )
+
+            expiring_calls = []
+
+            if response.status_code == 200:
+                data = response.json()
+                positions_data = data.get("positions", {})
+
+                if positions_data == "null" or not positions_data:
+                    if self.logger:
+                        self.logger.log_info("No positions found")
+                    return []
+
+                position_list = positions_data.get("position", [])
+
+                # Handle single position (not a list)
+                if isinstance(position_list, dict):
+                    position_list = [position_list]
+
+                expiration_str = expiration_date.strftime("%y%m%d")
+
+                for pos in position_list:
+                    pos_symbol = pos.get("symbol", "")
+                    quantity = int(pos.get("quantity", 0))
+
+                    # Filter by symbol if specified
+                    if symbol and not pos_symbol.startswith(symbol.upper()):
+                        continue
+
+                    # Check if this is a call option expiring on the target date
+                    if (len(pos_symbol) > 6 and  # Option symbol format
+                        "C" in pos_symbol[-9:] and  # Call option
+                        expiration_str in pos_symbol and  # Expiring on target date
+                        quantity < 0):  # Short position (negative quantity)
+
+                        # Parse strike price from option symbol
+                        # Format: SYMBOL + YYMMDD + C + 00000000 (strike * 1000)
+                        try:
+                            # Find the 'C' in the symbol and extract strike
+                            c_index = pos_symbol.rfind('C')
+                            if c_index > 0:
+                                strike_str = pos_symbol[c_index + 1:]
+                                strike = float(strike_str) / 1000.0
+                                
+                                # Extract underlying symbol (everything before date)
+                                underlying_symbol = pos_symbol[:c_index - 6]
+
+                                option_position = OptionPosition(
+                                    symbol=pos_symbol,
+                                    strike=strike,
+                                    expiration=expiration_date,
+                                    option_type="call",
+                                    quantity=abs(quantity),  # Convert to positive for consistency
+                                    market_value=float(pos.get("market_value", 0) or 0),
+                                    average_cost=float(pos.get("cost_basis", 0)) / max(abs(quantity), 1),
+                                )
+                                expiring_calls.append(option_position)
+
+                        except (ValueError, IndexError) as parse_error:
+                            if self.logger:
+                                self.logger.log_warning(
+                                    f"Failed to parse option symbol: {pos_symbol}",
+                                    {"error": str(parse_error)}
+                                )
+                            continue
+
+            if self.logger:
+                filter_msg = f" for {symbol}" if symbol else ""
+                self.logger.log_info(
+                    f"Found {len(expiring_calls)} expiring short calls{filter_msg}",
+                    {
+                        "expiration_date": expiration_date.isoformat(),
+                        "symbol_filter": symbol,
+                        "call_count": len(expiring_calls)
+                    }
+                )
+
+            return expiring_calls
+
+        except Exception as e:
+            error_msg = f"Error getting expiring short calls: {str(e)}"
+            if self.logger:
+                self.logger.log_error(
+                    error_msg,
+                    e,
+                    {
+                        "expiration_date": expiration_date.isoformat(),
+                        "symbol_filter": symbol,
+                        "error_type": type(e).__name__,
+                    }
+                )
+            raise RuntimeError(error_msg) from e

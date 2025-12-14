@@ -157,6 +157,18 @@ class Config:
     ic_expiration_days: int = 30  # Days until expiration
     ic_num_contracts: int = 1  # Number of iron condors
 
+    # Tiered Covered Calls settings (tcc)
+    tcc_min_shares_required: int = 300  # Minimum shares needed to execute strategy
+    tcc_max_contracts_per_expiration: int = 10  # Safety limit per expiration
+    tcc_min_days_to_expiration: int = 7  # Minimum days to expiration for filtering
+    tcc_max_days_to_expiration: int = 60  # Maximum days to expiration for filtering
+    tcc_strike_increment_minimum: float = 2.50  # Minimum difference between strikes
+    tcc_premium_threshold_per_contract: float = 0.50  # Minimum premium to consider execution
+    tcc_roll_enabled: bool = True  # Enable automatic rolling of expiring ITM calls
+    tcc_roll_execution_time: str = "15:30"  # Time of day to check for roll opportunities
+    tcc_min_roll_credit: float = 0.10  # Minimum credit required to execute a roll
+    tcc_max_roll_days_out: int = 45  # Maximum days to expiration for roll targets
+
     def validate(self) -> tuple[bool, Optional[str]]:
         """Validate the entire configuration.
 
@@ -240,5 +252,27 @@ class Config:
         is_valid, error = self.logging_config.validate()
         if not is_valid:
             return False, f"Logging config error: {error}"
+
+        # Validate tiered covered calls settings
+        if self.tcc_min_shares_required < 100:
+            return False, "TCC minimum shares required must be at least 100"
+        if self.tcc_max_contracts_per_expiration <= 0:
+            return False, "TCC maximum contracts per expiration must be positive"
+        if self.tcc_min_days_to_expiration <= 0:
+            return False, "TCC minimum days to expiration must be positive"
+        if self.tcc_max_days_to_expiration <= self.tcc_min_days_to_expiration:
+            return False, "TCC maximum days to expiration must be greater than minimum"
+        if self.tcc_strike_increment_minimum <= 0:
+            return False, "TCC strike increment minimum must be positive"
+        if self.tcc_premium_threshold_per_contract < 0:
+            return False, "TCC premium threshold per contract cannot be negative"
+        if self.tcc_min_roll_credit < 0:
+            return False, "TCC minimum roll credit cannot be negative"
+        if self.tcc_max_roll_days_out <= 0:
+            return False, "TCC maximum roll days out must be positive"
+        # Validate roll execution time format (HH:MM)
+        import re
+        if not re.match(r'^([01]?[0-9]|2[0-3]):[0-5][0-9]$', self.tcc_roll_execution_time):
+            return False, "TCC roll execution time must be in HH:MM format"
 
         return True, None

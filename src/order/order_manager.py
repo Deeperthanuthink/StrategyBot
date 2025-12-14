@@ -2,11 +2,13 @@
 
 from dataclasses import dataclass
 from datetime import datetime, date
-from typing import Optional
+from typing import Optional, List, Tuple
 import time
 
 from src.brokers.base_client import BaseBrokerClient, SpreadOrder, OrderResult
+from src.positions.models import CoveredCallOrder
 from src.logging.bot_logger import BotLogger
+from .order_validator import OrderValidator, BatchOrderResult
 
 
 @dataclass
@@ -34,11 +36,12 @@ class OrderManager:
         Args:
             broker_client: BaseBrokerClient instance for order execution
             logger: BotLogger instance for logging
-            dry_run: If True, simulate order submission without actually placing orders
+            dry_run: If True, simulate order submission without actually places orders
         """
         self.broker_client = broker_client
         self.logger = logger
         self.dry_run = dry_run
+        self.order_validator = OrderValidator(logger)
 
     def create_spread_order(
         self,
@@ -598,3 +601,401 @@ class OrderManager:
                 error_message=error_msg,
                 timestamp=timestamp,
             )
+    
+    def submit_multiple_covered_call_orders(
+        self,
+        orders: List[CoveredCallOrder],
+        position_summary,
+        max_retries: int = 3
+    ) -> BatchOrderResult:
+        """Submit multiple covered call orders with comprehensive error handling.
+        
+        This method provides comprehensive validation, error recovery, and logging
+        for batch covered call order submission.
+        
+        Args:
+            orders: List of CoveredCallOrder objects to submit
+            position_summary: Current position summary for validation
+            max_retries: Maximum retry attempts per order
+            
+        Returns:
+            BatchOrderResult with detailed execution results
+        """
+        if not orders:
+            self.logger.log_warning("No orders provided for submission")
+            return BatchOrderResult(
+                successful_orders=[],
+                failed_orders=[],
+                partial_success=False,
+                total_premium_collected=0.0,
+                execution_summary={"total_orders": 0, "successful_orders": 0, "failed_orders": 0}
+            )
+        
+        symbol = orders[0].symbol
+        
+        self.logger.log_info(
+            f"Starting batch covered call order submission for {symbol}",
+            {
+                "symbol": symbol,
+                "order_count": len(orders),
+                "total_contracts": sum(order.quantity for order in orders),
+                "dry_run": self.dry_run
+            }
+        )
+        
+        try:
+            # 1. Pre-submission validation
+            validation_result = self.order_validator.validate_orders_before_submission(
+                orders, position_summary
+            )
+            
+            if not validation_result.is_valid:
+                self.logger.log_error(
+                    f"Order validation failed for {symbol}",
+                    context={
+                        "symbol": symbol,
+                        "errors": validation_result.errors,
+                        "rejected_orders": len(validation_result.rejected_orders)
+                    }
+                )
+                
+                # Return all orders as failed
+                failed_orders = [(order, OrderResult(
+                    success=False,
+                    order_id=None,
+                    status="validation_failed",
+                    error_message="; ".join(validation_result.errors)
+                )) for order in orders]
+                
+                return BatchOrderResult(
+                    successful_orders=[],
+                    failed_orders=failed_orders,
+                    partial_success=False,
+                    total_premium_collected=0.0,
+                    execution_summary={
+                        "total_orders": len(orders),
+                        "successful_orders": 0,
+                        "failed_orders": len(orders),
+                        "validation_failed": True
+                    }
+                )
+            
+            # Log validation warnings
+            for warning in validation_result.warnings:
+                self.logger.log_warning(f"Order validation warning for {symbol}: {warning}")
+            
+            # 2. Log order submission details
+            self.order_validator.log_order_submission_details(
+                validation_result.validated_orders, symbol
+            )
+            
+            # 3. Submit validated orders
+            if self.dry_run:
+                # Simulate order submission in dry-run mode
+                results = self._simulate_covered_call_orders(validation_result.validated_orders)
+            else:
+                # Submit orders through broker client
+                results = self._submit_covered_call_orders_with_retry(
+                    validation_result.validated_orders, max_retries
+                )
+            
+            # 4. Handle partial failures and create comprehensive result
+            batch_result = self.order_validator.handle_partial_order_failures(
+                validation_result.validated_orders, results
+            )
+            
+            # 5. Add any rejected orders to failed orders
+            for rejected_order in validation_result.rejected_orders:
+                failed_result = OrderResult(
+                    success=False,
+                    order_id=None,
+                    status="validation_rejected",
+                    error_message="Order rejected during validation"
+                )
+                batch_result.failed_orders.append((rejected_order, failed_result))
+            
+            # 6. Update execution summary
+            batch_result.execution_summary.update({
+                "validation_warnings": len(validation_result.warnings),
+                "validation_errors": len(validation_result.errors),
+                "rejected_orders": len(validation_result.rejected_orders),
+                "dry_run": self.dry_run
+            })
+            
+            # 7. Log final results
+            self.logger.log_info(
+                f"Batch covered call order submission completed for {symbol}",
+                {
+                    "symbol": symbol,
+                    "total_orders": len(orders),
+                    "successful_orders": len(batch_result.successful_orders),
+                    "failed_orders": len(batch_result.failed_orders),
+                    "success_rate": batch_result.execution_summary.get("success_rate", 0),
+                    "total_premium_collected": batch_result.total_premium_collected
+                }
+            )
+            
+            return batch_result
+            
+        except Exception as e:
+            error_msg = f"Unexpected error during batch order submission for {symbol}: {str(e)}"
+            self.logger.log_error(error_msg, e, {"symbol": symbol})
+            
+            # Return all orders as failed
+            failed_orders = [(order, OrderResult(
+                success=False,
+                order_id=None,
+                status="batch_error",
+                error_message=error_msg
+            )) for order in orders]
+            
+            return BatchOrderResult(
+                successful_orders=[],
+                failed_orders=failed_orders,
+                partial_success=False,
+                total_premium_collected=0.0,
+                execution_summary={
+                    "total_orders": len(orders),
+                    "successful_orders": 0,
+                    "failed_orders": len(orders),
+                    "batch_error": True,
+                    "error_message": error_msg
+                }
+            )
+    
+    def _submit_covered_call_orders_with_retry(
+        self,
+        orders: List[CoveredCallOrder],
+        max_retries: int
+    ) -> List[OrderResult]:
+        """Submit covered call orders with retry logic.
+        
+        Args:
+            orders: Validated orders to submit
+            max_retries: Maximum retry attempts per order
+            
+        Returns:
+            List of OrderResult objects
+        """
+        results = []
+        
+        # Try batch submission first if broker supports it
+        try:
+            batch_results = self.broker_client.submit_multiple_covered_call_orders(orders)
+            
+            # Check if all orders succeeded
+            all_successful = all(result.success for result in batch_results)
+            
+            if all_successful:
+                self.logger.log_info(
+                    f"Batch submission successful for all {len(orders)} orders"
+                )
+                return batch_results
+            else:
+                # Some orders failed, log details
+                failed_count = sum(1 for result in batch_results if not result.success)
+                self.logger.log_warning(
+                    f"Batch submission partially failed: {failed_count}/{len(orders)} orders failed"
+                )
+                
+                # Retry failed orders individually
+                for i, (order, result) in enumerate(zip(orders, batch_results)):
+                    if not result.success and max_retries > 1:
+                        self.logger.log_info(f"Retrying failed order {i+1} individually")
+                        retry_result = self._retry_single_covered_call_order(order, max_retries - 1)
+                        results.append(retry_result)
+                    else:
+                        results.append(result)
+                
+                return results
+                
+        except Exception as e:
+            self.logger.log_warning(
+                f"Batch submission failed, falling back to individual orders: {str(e)}"
+            )
+            
+            # Fall back to individual order submission
+            for order in orders:
+                result = self._retry_single_covered_call_order(order, max_retries)
+                results.append(result)
+            
+            return results
+    
+    def _retry_single_covered_call_order(
+        self,
+        order: CoveredCallOrder,
+        max_retries: int
+    ) -> OrderResult:
+        """Retry a single covered call order with exponential backoff.
+        
+        Args:
+            order: CoveredCallOrder to submit
+            max_retries: Maximum retry attempts
+            
+        Returns:
+            OrderResult with final status
+        """
+        attempt = 0
+        last_error = None
+        
+        while attempt < max_retries:
+            attempt += 1
+            
+            try:
+                self.logger.log_info(
+                    f"Submitting covered call order for {order.symbol} (attempt {attempt}/{max_retries})",
+                    {
+                        "symbol": order.symbol,
+                        "strike": order.strike,
+                        "expiration": order.expiration.isoformat(),
+                        "quantity": order.quantity,
+                        "attempt": attempt
+                    }
+                )
+                
+                # Submit single order
+                result = self.broker_client.submit_covered_call_order(
+                    symbol=order.symbol,
+                    call_strike=order.strike,
+                    expiration=order.expiration,
+                    num_contracts=order.quantity
+                )
+                
+                if result.success:
+                    self.logger.log_info(
+                        f"Covered call order successful for {order.symbol}",
+                        {
+                            "symbol": order.symbol,
+                            "order_id": result.order_id,
+                            "attempts": attempt
+                        }
+                    )
+                    return result
+                else:
+                    last_error = result.error_message
+                    self.logger.log_warning(
+                        f"Covered call order failed for {order.symbol} (attempt {attempt}/{max_retries}): {result.error_message}"
+                    )
+                    
+                    # Check if error is retryable
+                    if not self._is_retryable_error(result.error_message):
+                        self.logger.log_error(
+                            f"Non-retryable error for {order.symbol}, aborting retries"
+                        )
+                        return result
+                    
+                    # Wait with exponential backoff if not last attempt
+                    if attempt < max_retries:
+                        backoff_time = 2 ** (attempt - 1)
+                        self.logger.log_info(
+                            f"Retrying covered call order for {order.symbol} after {backoff_time}s backoff"
+                        )
+                        time.sleep(backoff_time)
+                        
+            except Exception as e:
+                last_error = str(e)
+                self.logger.log_error(
+                    f"Unexpected error submitting covered call order for {order.symbol} (attempt {attempt}/{max_retries})",
+                    e
+                )
+                
+                # Wait with exponential backoff if not last attempt
+                if attempt < max_retries:
+                    backoff_time = 2 ** (attempt - 1)
+                    time.sleep(backoff_time)
+        
+        # All retries exhausted
+        self.logger.log_error(
+            f"Covered call order failed for {order.symbol} after {max_retries} attempts",
+            context={"symbol": order.symbol, "last_error": last_error}
+        )
+        
+        return OrderResult(
+            success=False,
+            order_id=None,
+            status="max_retries_exceeded",
+            error_message=f"Failed after {max_retries} attempts. Last error: {last_error}"
+        )
+    
+    def _simulate_covered_call_orders(
+        self,
+        orders: List[CoveredCallOrder]
+    ) -> List[OrderResult]:
+        """Simulate covered call order submission for dry-run mode.
+        
+        Args:
+            orders: Orders to simulate
+            
+        Returns:
+            List of simulated OrderResult objects
+        """
+        results = []
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+        
+        for i, order in enumerate(orders):
+            self.logger.log_info(
+                f"[DRY-RUN] Simulating covered call order for {order.symbol}",
+                {
+                    "symbol": order.symbol,
+                    "strike": order.strike,
+                    "expiration": order.expiration.isoformat(),
+                    "quantity": order.quantity,
+                    "dry_run": True
+                }
+            )
+            
+            # Simulate successful order
+            result = OrderResult(
+                success=True,
+                order_id=f"DRY-RUN-CC-{order.symbol}-{timestamp}-{i+1}",
+                status="simulated",
+                error_message=None
+            )
+            results.append(result)
+        
+        return results
+    
+    def log_order_execution_summary(
+        self,
+        batch_result: BatchOrderResult,
+        symbol: str
+    ) -> None:
+        """Log comprehensive order execution summary.
+        
+        Args:
+            batch_result: Result of batch order execution
+            symbol: Stock symbol
+        """
+        if not self.logger:
+            return
+        
+        summary = batch_result.execution_summary
+        
+        self.logger.log_info(
+            f"Order execution summary for {symbol}",
+            {
+                "symbol": symbol,
+                "total_orders": summary.get("total_orders", 0),
+                "successful_orders": summary.get("successful_orders", 0),
+                "failed_orders": summary.get("failed_orders", 0),
+                "success_rate": f"{summary.get('success_rate', 0):.1%}",
+                "total_premium_collected": batch_result.total_premium_collected,
+                "partial_success": batch_result.partial_success
+            }
+        )
+        
+        # Log successful orders
+        if batch_result.successful_orders:
+            self.logger.log_info(f"Successful orders for {symbol}:")
+            for order, result in batch_result.successful_orders:
+                self.logger.log_info(
+                    f"  ✓ {order.expiration.isoformat()} ${order.strike} x{order.quantity} - Order ID: {result.order_id}"
+                )
+        
+        # Log failed orders
+        if batch_result.failed_orders:
+            self.logger.log_warning(f"Failed orders for {symbol}:")
+            for order, result in batch_result.failed_orders:
+                self.logger.log_warning(
+                    f"  ✗ {order.expiration.isoformat()} ${order.strike} x{order.quantity} - Error: {result.error_message}"
+                )
