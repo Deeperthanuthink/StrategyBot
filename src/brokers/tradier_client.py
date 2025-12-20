@@ -303,8 +303,120 @@ class TradierClient(BaseBrokerClient):
                 )
             raise
 
+    def get_option_expirations(self, symbol: str) -> List[date]:
+        """Get available option expiration dates for a symbol using Tradier REST API.
+
+        Args:
+            symbol: Stock symbol (e.g., 'TLT')
+
+        Returns:
+            List of expiration dates sorted chronologically
+
+        Raises:
+            ValueError: If API request fails or no expirations available
+        """
+        try:
+            import requests
+            
+            base_url = "https://sandbox.tradier.com" if self.is_sandbox else "https://api.tradier.com"
+            
+            # Use Tradier REST API to get option expirations
+            response = requests.get(
+                f"{base_url}/v1/markets/options/expirations",
+                params={"symbol": symbol},
+                headers={
+                    "Authorization": f"Bearer {self.api_token}",
+                    "Accept": "application/json"
+                }
+            )
+
+            if response.status_code != 200:
+                error_msg = f"Tradier API error: {response.status_code} - {response.text}"
+                if self.logger:
+                    self.logger.log_error(
+                        f"Failed to get option expirations for {symbol}",
+                        None,
+                        {
+                            "symbol": symbol,
+                            "status_code": response.status_code,
+                            "response": response.text
+                        }
+                    )
+                raise ValueError(error_msg)
+
+            data = response.json()
+            expirations_data = data.get("expirations")
+
+            if not expirations_data:
+                error_msg = f"No option expirations available for {symbol}"
+                if self.logger:
+                    self.logger.log_error(
+                        error_msg,
+                        None,
+                        {"symbol": symbol, "response": data}
+                    )
+                raise ValueError(error_msg)
+
+            date_strings = expirations_data.get("date", [])
+
+            if not date_strings:
+                error_msg = f"No option expirations available for {symbol}"
+                if self.logger:
+                    self.logger.log_error(
+                        error_msg,
+                        None,
+                        {"symbol": symbol, "response": data}
+                    )
+                raise ValueError(error_msg)
+
+            # Convert date strings to date objects
+            from datetime import datetime
+            expiration_dates = []
+            for date_str in date_strings:
+                try:
+                    expiration_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    expiration_dates.append(expiration_date)
+                except ValueError as e:
+                    if self.logger:
+                        self.logger.log_warning(
+                            f"Failed to parse expiration date: {date_str}",
+                            {"symbol": symbol, "date_str": date_str, "error": str(e)}
+                        )
+                    continue
+
+            # Sort dates chronologically
+            expiration_dates.sort()
+
+            if self.logger:
+                self.logger.log_info(
+                    f"Retrieved {len(expiration_dates)} option expirations for {symbol}",
+                    {
+                        "symbol": symbol,
+                        "count": len(expiration_dates),
+                        "first_expiration": expiration_dates[0].isoformat() if expiration_dates else None,
+                        "last_expiration": expiration_dates[-1].isoformat() if expiration_dates else None
+                    }
+                )
+
+            return expiration_dates
+
+        except ValueError:
+            raise
+        except Exception as e:
+            error_msg = f"Unexpected error getting option expirations for {symbol}: {str(e)}"
+            if self.logger:
+                self.logger.log_error(
+                    error_msg,
+                    e,
+                    {"symbol": symbol, "error_type": type(e).__name__}
+                )
+            raise ValueError(error_msg) from e
+
     def get_option_chain(self, symbol: str, expiration: date) -> List[OptionContract]:
-        """Get option chain for a symbol and expiration date, including both calls and puts.
+        """Get option chain for a symbol and expiration date using Tradier REST API.
+        
+        This method uses the Tradier REST API directly, which provides option data
+        even when the market is closed, avoiding the need for synthetic strikes.
 
         Args:
             symbol: Stock symbol (e.g., 'AAPL')
@@ -317,70 +429,117 @@ class TradierClient(BaseBrokerClient):
             ValueError: If option chain is unavailable
         """
         try:
-            # Create underlying asset
-            underlying = Asset(symbol=symbol, asset_type="stock")
-
-            # Get option chain using Lumibot
-            chains = self.broker.get_chains(underlying)
-
-            if not chains:
-                raise ValueError(f"No option chains available for {symbol}")
-
-            # Filter for the specific expiration date and get both calls and puts
+            import requests
+            
+            base_url = "https://sandbox.tradier.com" if self.is_sandbox else "https://api.tradier.com"
             expiration_str = expiration.strftime("%Y-%m-%d")
+            
+            # Use Tradier REST API to get option chain
+            response = requests.get(
+                f"{base_url}/v1/markets/options/chains",
+                params={
+                    "symbol": symbol,
+                    "expiration": expiration_str,
+                    "greeks": "false"
+                },
+                headers={
+                    "Authorization": f"Bearer {self.api_token}",
+                    "Accept": "application/json"
+                }
+            )
+            
             options = []
-
-            for chain in chains:
-                # Check if this chain matches our expiration
-                if hasattr(chain, "expiration") and str(chain.expiration) == expiration_str:
-                    # Get strikes for calls
-                    if hasattr(chain, "calls") and chain.calls:
-                        for strike in chain.calls:
-                            # Create option symbol in OCC format
-                            exp_str = expiration.strftime("%y%m%d")
-                            strike_str = f"{int(strike * 1000):08d}"
-                            option_symbol = f"{symbol}{exp_str}C{strike_str}"
-
-                            contract = OptionContract(
-                                symbol=option_symbol,
-                                strike=float(strike),
-                                expiration=expiration,
-                                option_type="call",
-                            )
-                            options.append(contract)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                if self.logger:
+                    self.logger.log_info(
+                        f"Tradier API response for {symbol}",
+                        {
+                            "symbol": symbol,
+                            "expiration": expiration_str,
+                            "response_keys": list(data.keys()) if data else [],
+                            "has_options": "options" in data
+                        }
+                    )
+                
+                options_data = data.get("options", {})
+                
+                if options_data and options_data != "null":
+                    option_list = options_data.get("option", [])
                     
-                    # Get strikes for puts
-                    if hasattr(chain, "puts") and chain.puts:
-                        for strike in chain.puts:
+                    if self.logger:
+                        self.logger.log_info(
+                            f"Processing option list for {symbol}",
+                            {
+                                "symbol": symbol,
+                                "option_count": len(option_list) if isinstance(option_list, list) else 1,
+                                "is_list": isinstance(option_list, list)
+                            }
+                        )
+                    
+                    # Handle single option (not a list)
+                    if isinstance(option_list, dict):
+                        option_list = [option_list]
+                    
+                    exp_str = expiration.strftime("%y%m%d")
+                    
+                    for option in option_list:
+                        strike = float(option.get("strike", 0))
+                        option_type = option.get("option_type", "").lower()  # 'call' or 'put'
+                        
+                        if option_type in ["call", "put"]:
                             # Create option symbol in OCC format
-                            exp_str = expiration.strftime("%y%m%d")
                             strike_str = f"{int(strike * 1000):08d}"
-                            option_symbol = f"{symbol}{exp_str}P{strike_str}"
-
+                            type_char = "C" if option_type == "call" else "P"
+                            option_symbol = f"{symbol}{exp_str}{type_char}{strike_str}"
+                            
                             contract = OptionContract(
                                 symbol=option_symbol,
-                                strike=float(strike),
+                                strike=strike,
                                 expiration=expiration,
-                                option_type="put",
+                                option_type=option_type,
                             )
                             options.append(contract)
-
+                else:
+                    if self.logger:
+                        self.logger.log_warning(
+                            f"No options data in Tradier response for {symbol}",
+                            {
+                                "symbol": symbol,
+                                "expiration": expiration_str,
+                                "options_data": str(options_data)[:100]
+                            }
+                        )
+            else:
+                if self.logger:
+                    self.logger.log_warning(
+                        f"Tradier API returned non-200 status for {symbol}",
+                        {
+                            "symbol": symbol,
+                            "expiration": expiration_str,
+                            "status_code": response.status_code,
+                            "response_text": response.text[:200]
+                        }
+                    )
+            
             if not options:
                 if self.logger:
                     self.logger.log_warning(
-                        f"No options from API for {symbol} - generating synthetic strikes (market may be closed)",
-                        {"symbol": symbol, "expiration": expiration_str},
+                        f"No options from Tradier API for {symbol} expiration {expiration_str} - generating synthetic strikes",
+                        {"symbol": symbol, "expiration": expiration_str, "status_code": response.status_code}
                     )
-
-                # Generate synthetic option chain when real data unavailable
+                
+                # Fall back to synthetic strikes only if API returns nothing
                 options = self._generate_synthetic_strikes(symbol, expiration)
-
+                
                 if self.logger:
                     self.logger.log_info(
                         f"Generated {len(options)} synthetic strikes for {symbol}",
-                        {"symbol": symbol, "strike_count": len(options)},
+                        {"symbol": symbol, "strike_count": len(options)}
                     )
-
+            
             if self.logger:
                 call_count = len([opt for opt in options if opt.option_type == "call"])
                 put_count = len([opt for opt in options if opt.option_type == "put"])
@@ -392,9 +551,10 @@ class TradierClient(BaseBrokerClient):
                         "call_count": call_count,
                         "put_count": put_count,
                         "total_count": len(options),
-                    },
+                        "source": "tradier_api" if call_count > 0 or put_count > 0 else "synthetic"
+                    }
                 )
-
+            
             return options
 
         except ValueError:

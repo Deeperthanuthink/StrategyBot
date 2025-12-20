@@ -1,5 +1,5 @@
-"""Alpaca API client module."""
+"""Tradier API client module."""
 
-from src.alpaca.alpaca_client import AlpacaClient
+from src.tradier.tradier_client import TradierClient
 
-__all__ = ["AlpacaClient"]
+__all__ = ["TradierClient"]

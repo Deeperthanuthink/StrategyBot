@@ -158,6 +158,18 @@ class BaseBrokerClient(ABC):
         pass
 
     @abstractmethod
+    def get_option_expirations(self, symbol: str) -> List[date]:
+        """Get available option expiration dates for a symbol.
+
+        Args:
+            symbol: Stock symbol
+
+        Returns:
+            List of expiration dates sorted chronologically
+        """
+        pass
+
+    @abstractmethod
     def get_option_chain(self, symbol: str, expiration: date) -> List[OptionContract]:
         """Get option chain for a symbol and expiration date.
 

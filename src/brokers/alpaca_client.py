@@ -184,6 +184,80 @@ class AlpacaClient(BaseBrokerClient):
                 self.logger.log_error(f"Error getting price for {symbol}: {str(e)}", e)
             raise
 
+    def get_option_expirations(self, symbol: str) -> List[date]:
+        """Get available option expiration dates for a symbol.
+
+        Args:
+            symbol: Stock symbol (e.g., 'TLT')
+
+        Returns:
+            List of expiration dates sorted chronologically
+
+        Raises:
+            ValueError: If API request fails or no expirations available
+        """
+        try:
+            underlying = Asset(symbol=symbol, asset_type="stock")
+            chains = self.broker.get_chains(underlying)
+
+            if not chains:
+                error_msg = f"No option chains available for {symbol}"
+                if self.logger:
+                    self.logger.log_error(error_msg, context={"symbol": symbol, "broker": "Alpaca"})
+                raise ValueError(error_msg)
+
+            # Extract unique expiration dates from chains
+            expiration_dates = []
+            for chain in chains:
+                if hasattr(chain, "expiration"):
+                    exp_str = str(chain.expiration)
+                    try:
+                        exp_date = datetime.strptime(exp_str, "%Y-%m-%d").date()
+                        if exp_date not in expiration_dates:
+                            expiration_dates.append(exp_date)
+                    except ValueError:
+                        if self.logger:
+                            self.logger.log_warning(
+                                f"Failed to parse expiration date: {exp_str}",
+                                {"symbol": symbol, "date_str": exp_str}
+                            )
+                        continue
+
+            if not expiration_dates:
+                error_msg = f"No option expirations available for {symbol}"
+                if self.logger:
+                    self.logger.log_error(error_msg, context={"symbol": symbol, "broker": "Alpaca"})
+                raise ValueError(error_msg)
+
+            # Sort dates chronologically
+            expiration_dates.sort()
+
+            if self.logger:
+                self.logger.log_info(
+                    f"Retrieved {len(expiration_dates)} option expirations for {symbol}",
+                    {
+                        "symbol": symbol,
+                        "count": len(expiration_dates),
+                        "first_expiration": expiration_dates[0].isoformat() if expiration_dates else None,
+                        "last_expiration": expiration_dates[-1].isoformat() if expiration_dates else None,
+                        "broker": "Alpaca"
+                    }
+                )
+
+            return expiration_dates
+
+        except ValueError:
+            raise
+        except Exception as e:
+            error_msg = f"Unexpected error getting option expirations for {symbol}: {str(e)}"
+            if self.logger:
+                self.logger.log_error(
+                    error_msg,
+                    e,
+                    {"symbol": symbol, "error_type": type(e).__name__, "broker": "Alpaca"}
+                )
+            raise ValueError(error_msg) from e
+
     def get_option_chain(self, symbol: str, expiration: date) -> List[OptionContract]:
         """Get option chain for a symbol and expiration date."""
         try:

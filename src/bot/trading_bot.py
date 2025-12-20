@@ -194,9 +194,7 @@ class TradingBot:
             # Initialize covered call roller
             self.covered_call_roller = CoveredCallRoller(
                 broker_client=self.broker_client,
-                logger=self.logger if self.logger else None,
-                min_roll_credit=self.config.tcc_min_roll_credit,
-                max_roll_days_out=self.config.tcc_max_roll_days_out
+                logger=self.logger if self.logger else None
             )
             
             # Initialize position service

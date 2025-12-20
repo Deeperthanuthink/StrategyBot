@@ -250,6 +250,105 @@ class TradierClient:
                 )
             raise
 
+    def get_option_expirations(self, symbol: str) -> List[date]:
+        """Get available option expiration dates for a symbol.
+
+        Args:
+            symbol: Stock symbol (e.g., 'TLT')
+
+        Returns:
+            List of expiration dates sorted chronologically
+
+        Raises:
+            ValueError: If API request fails or no expirations available
+        """
+        try:
+            response = self.session.get(
+                f"{self.base_url}/v1/markets/options/expirations",
+                params={"symbol": symbol}
+            )
+
+            if response.status_code != 200:
+                error_msg = f"Tradier API error: {response.status_code} - {response.text}"
+                if self.logger:
+                    self.logger.log_error(
+                        f"Failed to get option expirations for {symbol}",
+                        None,
+                        {
+                            "symbol": symbol,
+                            "status_code": response.status_code,
+                            "response": response.text
+                        }
+                    )
+                raise ValueError(error_msg)
+
+            data = response.json()
+            expirations_data = data.get("expirations")
+
+            if not expirations_data:
+                error_msg = f"No option expirations available for {symbol}"
+                if self.logger:
+                    self.logger.log_error(
+                        error_msg,
+                        None,
+                        {"symbol": symbol, "response": data}
+                    )
+                raise ValueError(error_msg)
+
+            date_strings = expirations_data.get("date", [])
+
+            if not date_strings:
+                error_msg = f"No option expirations available for {symbol}"
+                if self.logger:
+                    self.logger.log_error(
+                        error_msg,
+                        None,
+                        {"symbol": symbol, "response": data}
+                    )
+                raise ValueError(error_msg)
+
+            # Convert date strings to date objects
+            expiration_dates = []
+            for date_str in date_strings:
+                try:
+                    expiration_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+                    expiration_dates.append(expiration_date)
+                except ValueError as e:
+                    if self.logger:
+                        self.logger.log_warning(
+                            f"Failed to parse expiration date: {date_str}",
+                            {"symbol": symbol, "date_str": date_str, "error": str(e)}
+                        )
+                    continue
+
+            # Sort dates chronologically
+            expiration_dates.sort()
+
+            if self.logger:
+                self.logger.log_info(
+                    f"Retrieved {len(expiration_dates)} option expirations for {symbol}",
+                    {
+                        "symbol": symbol,
+                        "count": len(expiration_dates),
+                        "first_expiration": expiration_dates[0].isoformat() if expiration_dates else None,
+                        "last_expiration": expiration_dates[-1].isoformat() if expiration_dates else None
+                    }
+                )
+
+            return expiration_dates
+
+        except ValueError:
+            raise
+        except Exception as e:
+            error_msg = f"Unexpected error getting option expirations for {symbol}: {str(e)}"
+            if self.logger:
+                self.logger.log_error(
+                    error_msg,
+                    e,
+                    {"symbol": symbol, "error_type": type(e).__name__}
+                )
+            raise ValueError(error_msg) from e
+
     def get_option_chain(self, symbol: str, expiration: date) -> List[OptionContract]:
         """Get option chain for a symbol and expiration date, filtered for put options.
 

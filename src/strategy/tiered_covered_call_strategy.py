@@ -57,26 +57,12 @@ class TieredCoveredCallCalculator:
         self.validator = PositionValidator(logger)
         self.cost_basis_tracker = cost_basis_tracker or CostBasisTracker(logger=logger)
     
-    def _skip_weekend(self, target_date: date) -> date:
-        """Skip to next weekday if target date falls on weekend.
-        
-        Args:
-            target_date: Date to check
-            
-        Returns:
-            Next weekday if target_date is weekend, otherwise target_date
-        """
-        # Skip weekends (Saturday=5, Sunday=6)
-        while target_date.weekday() >= 5:
-            target_date += timedelta(days=1)
-        return target_date
-    
     def find_next_three_expirations(self, symbol: str) -> List[date]:
         """Find the next three available expiration dates for the symbol.
         
-        This method identifies available expiration dates within the configured
-        date range and returns up to three expirations sorted chronologically.
-        Automatically skips weekends and tries multiple dates to find valid expirations.
+        This method retrieves available expiration dates from the Tradier API,
+        filters them by the configured date range, and validates that each
+        expiration has call options available.
         
         Args:
             symbol: Stock symbol to find expirations for
@@ -88,102 +74,161 @@ class TieredCoveredCallCalculator:
             ValueError: If no valid expirations are found
         """
         today = date.today()
-        min_expiration = self._skip_weekend(today + timedelta(days=self.min_days_to_expiration))
-        max_expiration = today + timedelta(days=self.max_days_to_expiration)
+        min_date = today + timedelta(days=self.min_days_to_expiration)
+        max_date = today + timedelta(days=self.max_days_to_expiration)
         
-        available_expirations = set()
-        
-        # Try querying many different dates to find available expirations
-        # Options typically expire on Fridays, but we'll try various days
-        days_to_try = list(range(self.min_days_to_expiration, min(self.max_days_to_expiration + 1, 90), 1))
-        
+        # Get all available expirations from Tradier API
         if self.logger:
-            self.logger.log_info(f"Searching for option expirations for {symbol} between {min_expiration} and {max_expiration}")
-        
-        for days_out in days_to_try:
-            sample_date = self._skip_weekend(today + timedelta(days=days_out))
-            
-            # Skip if we've already tried this date or it's out of range
-            if sample_date > max_expiration:
-                break
-                
-            try:
-                sample_options = self.broker_client.get_option_chain(symbol, sample_date)
-                
-                # Extract expiration dates from the options
-                for option in sample_options:
-                    if min_expiration <= option.expiration <= max_expiration:
-                        available_expirations.add(option.expiration)
-                
-                # If we have enough expirations, we can stop searching
-                if len(available_expirations) >= 3:
-                    break
-                    
-            except Exception as e:
-                # Continue trying other dates if this one fails
-                if self.logger and "No options found" not in str(e):
-                    self.logger.log_debug(f"Could not get options for {sample_date}: {str(e)}")
-                continue
-        
-        # Convert to sorted list
-        sorted_expirations = sorted(list(available_expirations))
-        
-        if not sorted_expirations:
-            raise ValueError(
-                f"No valid expiration dates found for {symbol} between {min_expiration} and {max_expiration}. "
-                f"This may indicate insufficient option liquidity or that options are not available for this symbol."
+            self.logger.log_info(
+                f"Retrieving option expirations from API for {symbol}",
+                {"symbol": symbol, "min_date": str(min_date), "max_date": str(max_date)}
             )
         
-        # Validate that each expiration actually has call options available
+        try:
+            all_expirations = self.broker_client.get_option_expirations(symbol)
+        except Exception as e:
+            error_msg = f"Failed to retrieve option expirations for {symbol}: {str(e)}"
+            if self.logger:
+                self.logger.log_error(
+                    error_msg,
+                    e,
+                    {"symbol": symbol, "min_date": str(min_date), "max_date": str(max_date)}
+                )
+            raise ValueError(error_msg) from e
+        
+        if not all_expirations:
+            error_msg = f"No option expirations available for {symbol}"
+            if self.logger:
+                self.logger.log_error(
+                    error_msg,
+                    context={"symbol": symbol, "min_date": str(min_date), "max_date": str(max_date)}
+                )
+            raise ValueError(error_msg)
+        
+        if self.logger:
+            self.logger.log_info(
+                f"Retrieved {len(all_expirations)} expirations from API for {symbol}",
+                {
+                    "symbol": symbol,
+                    "total_count": len(all_expirations),
+                    "first_expiration": all_expirations[0].isoformat() if all_expirations else None,
+                    "last_expiration": all_expirations[-1].isoformat() if all_expirations else None
+                }
+            )
+        
+        # Filter by date range
+        filtered_expirations = [
+            exp for exp in all_expirations
+            if min_date <= exp <= max_date
+        ]
+        
+        if self.logger:
+            self.logger.log_info(
+                f"Filtered expirations by date range for {symbol}",
+                {
+                    "symbol": symbol,
+                    "before_filtering": len(all_expirations),
+                    "after_filtering": len(filtered_expirations),
+                    "excluded_count": len(all_expirations) - len(filtered_expirations)
+                }
+            )
+        
+        if not filtered_expirations:
+            error_msg = (
+                f"No expirations found between {min_date} and {max_date} for {symbol}. "
+                f"Found {len(all_expirations)} total expirations but none within date range."
+            )
+            if self.logger:
+                self.logger.log_error(
+                    error_msg,
+                    context={
+                        "symbol": symbol,
+                        "min_date": str(min_date),
+                        "max_date": str(max_date),
+                        "total_expirations": len(all_expirations),
+                        "date_range_days": (max_date - min_date).days
+                    }
+                )
+            raise ValueError(error_msg)
+        
+        # Validate that each expiration has call options available
         validated_expirations = []
-        for expiration in sorted_expirations[:5]:  # Check up to 5 to ensure we get 3 valid ones
+        for expiration in filtered_expirations[:5]:  # Check up to 5 to get 3 valid
             try:
                 options = self.broker_client.get_option_chain(symbol, expiration)
                 
+                # Filter for call options only
+                call_options = [opt for opt in options if opt.option_type and opt.option_type.lower() == 'call']
+                
                 if self.logger:
                     self.logger.log_info(
-                        f"Validating expiration {expiration}: found {len(options)} total options",
+                        f"Validating expiration {expiration} for {symbol}: found {len(call_options)} call options",
                         {
+                            "symbol": symbol,
                             "expiration": str(expiration),
                             "total_options": len(options),
-                            "option_types": [opt.option_type for opt in options[:5]] if options else []
+                            "call_options": len(call_options)
                         }
                     )
                 
-                # Filter for call options only - try both 'call' and 'Call'
-                call_options = [opt for opt in options if opt.option_type and opt.option_type.lower() == 'call']
-                
                 if call_options:
                     validated_expirations.append(expiration)
-                    if self.logger:
-                        self.logger.log_info(f"✅ Expiration {expiration} validated with {len(call_options)} call options")
                     if len(validated_expirations) >= 3:
                         break
                 else:
                     if self.logger:
                         self.logger.log_warning(
-                            f"❌ Expiration {expiration} has no call options (found {len(options)} total options)",
+                            f"Expiration {expiration} excluded for {symbol}: no call options available",
                             {
+                                "symbol": symbol,
                                 "expiration": str(expiration),
-                                "total_options": len(options),
-                                "sample_types": [opt.option_type for opt in options[:3]] if options else []
+                                "total_options": len(options)
                             }
                         )
             except Exception as e:
                 if self.logger:
-                    self.logger.log_warning(f"Could not validate expiration {expiration}: {str(e)}")
+                    self.logger.log_warning(
+                        f"Could not validate expiration {expiration} for {symbol}: {str(e)}",
+                        {"symbol": symbol, "expiration": str(expiration)}
+                    )
                 continue
         
         if not validated_expirations:
-            raise ValueError(
-                f"No expirations with call options found for {symbol} between {min_expiration} and {max_expiration}. "
-                f"Found {len(sorted_expirations)} expiration dates but none had call options available."
+            error_msg = (
+                f"No expirations with call options found for {symbol} between {min_date} and {max_date}. "
+                f"Checked {len(filtered_expirations)} expirations but none had call options available."
             )
+            if self.logger:
+                self.logger.log_error(
+                    error_msg,
+                    context={
+                        "symbol": symbol,
+                        "min_date": str(min_date),
+                        "max_date": str(max_date),
+                        "expirations_checked": len(filtered_expirations),
+                        "filtered_expirations": [str(exp) for exp in filtered_expirations[:5]]
+                    }
+                )
+            raise ValueError(error_msg)
         
         if self.logger:
+            if len(validated_expirations) < 3:
+                self.logger.log_warning(
+                    f"Found fewer than 3 valid expirations for {symbol}",
+                    {
+                        "symbol": symbol,
+                        "count": len(validated_expirations),
+                        "expirations": [str(exp) for exp in validated_expirations]
+                    }
+                )
+            
             self.logger.log_info(
-                f"Found {len(validated_expirations)} validated expiration dates with call options for {symbol}",
-                {"expirations": [str(exp) for exp in validated_expirations]}
+                f"Final validated expirations for {symbol}",
+                {
+                    "symbol": symbol,
+                    "count": len(validated_expirations),
+                    "expirations": [str(exp) for exp in validated_expirations]
+                }
             )
         
         # Return up to 3 validated expirations
@@ -441,6 +486,84 @@ class TieredCoveredCallCalculator:
             share_groups[0] += additional_contracts * 100
         
         return share_groups
+    
+    def validate_no_synthetic_strikes(self, symbol: str, expiration_groups: List[ExpirationGroup]) -> bool:
+        """Validate that all strikes in the strategy plan are from real option chains.
+        
+        This method verifies that no synthetic strikes are present in the strategy plan
+        by checking that each strike exists in the actual option chain for its expiration.
+        
+        Args:
+            symbol: Stock symbol
+            expiration_groups: List of expiration groups to validate
+            
+        Returns:
+            True if all strikes are real (not synthetic)
+            
+        Raises:
+            ValueError: If any synthetic strikes are detected
+        """
+        if self.logger:
+            self.logger.log_info(
+                f"Validating no synthetic strikes in strategy plan for {symbol}",
+                {"symbol": symbol, "groups_count": len(expiration_groups)}
+            )
+        
+        for group in expiration_groups:
+            try:
+                # Get real option chain for this expiration
+                options = self.broker_client.get_option_chain(symbol, group.expiration_date)
+                
+                # Extract real strikes from call options
+                call_options = [opt for opt in options if opt.option_type and opt.option_type.lower() == 'call']
+                real_strikes = [opt.strike for opt in call_options]
+                
+                # Check if the group's strike is in the real strikes
+                if group.strike_price not in real_strikes:
+                    error_msg = (
+                        f"Synthetic strike detected: {group.strike_price} for expiration "
+                        f"{group.expiration_date} is not in real option chain. "
+                        f"Real strikes: {real_strikes}"
+                    )
+                    if self.logger:
+                        self.logger.log_error(
+                            error_msg,
+                            context={
+                                "symbol": symbol,
+                                "expiration": str(group.expiration_date),
+                                "synthetic_strike": group.strike_price,
+                                "real_strikes": real_strikes
+                            }
+                        )
+                    raise ValueError(error_msg)
+                
+                if self.logger:
+                    self.logger.log_info(
+                        f"Strike {group.strike_price} validated for expiration {group.expiration_date}",
+                        {
+                            "symbol": symbol,
+                            "expiration": str(group.expiration_date),
+                            "strike": group.strike_price,
+                            "real_strikes_count": len(real_strikes)
+                        }
+                    )
+                    
+            except ValueError:
+                # Re-raise validation errors
+                raise
+            except Exception as e:
+                error_msg = f"Error validating strikes for {symbol} expiration {group.expiration_date}: {str(e)}"
+                if self.logger:
+                    self.logger.log_error(error_msg, e, {"symbol": symbol})
+                raise ValueError(error_msg) from e
+        
+        if self.logger:
+            self.logger.log_info(
+                f"All strikes validated as real (no synthetic strikes) for {symbol}",
+                {"symbol": symbol, "validated_groups": len(expiration_groups)}
+            )
+        
+        return True
     
     def calculate_cost_basis_impact(self, position_summary: PositionSummary, estimated_premium: float) -> Tuple[float, float, float, float]:
         """Calculate cost basis impact of the tiered covered call strategy.
@@ -733,6 +856,15 @@ class TieredCoveredCallCalculator:
                     f"Strategy validation warning for {symbol}: {final_validation.warning_message}",
                     {"symbol": symbol}
                 )
+            
+            # Validate no synthetic strikes are present in the strategy plan
+            try:
+                self.validate_no_synthetic_strikes(symbol, expiration_groups)
+            except ValueError as validation_error:
+                error_msg = f"Synthetic strike validation failed for {symbol}: {str(validation_error)}"
+                if self.logger:
+                    self.logger.log_error(error_msg, validation_error, {"symbol": symbol})
+                raise ValueError(error_msg) from validation_error
             
             # Calculate cost basis impact
             try:
