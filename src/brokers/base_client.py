@@ -523,3 +523,108 @@ class BaseBrokerClient(ABC):
             List of OptionPosition objects representing expiring short calls
         """
         pass
+
+    @abstractmethod
+    def submit_jade_lizard_order(
+        self,
+        symbol: str,
+        put_strike: float,
+        call_short_strike: float,
+        call_long_strike: float,
+        expiration: date,
+        num_contracts: int,
+    ) -> OrderResult:
+        """Submit a Jade Lizard order.
+
+        Jade Lizard structure (neutral-to-bullish, no upside risk if structured correctly):
+        - Sell 1 OTM put (collect premium, bullish on downside)
+        - Sell 1 OTM call (collect premium)
+        - Buy 1 further OTM call (protection against unlimited upside risk)
+
+        The key is: call spread width should be <= put premium collected
+        This eliminates upside risk while collecting premium on both sides.
+
+        Args:
+            symbol: Stock symbol
+            put_strike: OTM put strike to sell (below current price)
+            call_short_strike: OTM call strike to sell (above current price)
+            call_long_strike: Further OTM call strike to buy (protection)
+            expiration: Option expiration date
+            num_contracts: Number of jade lizards
+
+        Returns:
+            OrderResult with order ID and status
+        """
+        pass
+
+    @abstractmethod
+    def submit_big_lizard_order(
+        self,
+        symbol: str,
+        straddle_strike: float,
+        call_long_strike: float,
+        expiration: date,
+        num_contracts: int,
+    ) -> OrderResult:
+        """Submit a Big Lizard order.
+
+        Big Lizard structure (aggressive premium collection with upside protection):
+        - Sell 1 ATM put (at straddle strike)
+        - Sell 1 ATM call (at straddle strike)
+        - Buy 1 OTM call (protection against unlimited upside risk)
+
+        More aggressive than Jade Lizard - higher premium but more downside risk.
+        Essentially a short straddle with a long call for protection.
+
+        Args:
+            symbol: Stock symbol
+            straddle_strike: ATM strike for short straddle (put + call)
+            call_long_strike: OTM call strike to buy (protection)
+            expiration: Option expiration date
+            num_contracts: Number of big lizards
+
+        Returns:
+            OrderResult with order ID and status
+        """
+        pass
+
+    @abstractmethod
+    def submit_broken_wing_butterfly_order(
+        self,
+        symbol: str,
+        lower_strike: float,
+        middle_strike: float,
+        upper_strike: float,
+        expiration: date,
+        num_contracts: int,
+        option_type: str = "call",
+    ) -> OrderResult:
+        """Submit a Broken Wing Butterfly order.
+
+        Broken Wing Butterfly structure (asymmetric butterfly, can be done for credit):
+        - Buy 1 lower strike option
+        - Sell 2 middle strike options
+        - Buy 1 upper strike option (further away than normal butterfly)
+
+        The "broken" wing means unequal distances between strikes.
+        Example: Buy 100, Sell 2x 105, Buy 115 (5 wide on lower, 10 wide on upper)
+
+        Key features:
+        - Can be entered for a credit (unlike regular butterfly)
+        - Risk only on one side (the wider wing side)
+        - Max profit at middle strike
+        - No risk on the narrow wing side if done for credit
+
+        Args:
+            symbol: Stock symbol
+            lower_strike: Lower wing strike (buy 1)
+            middle_strike: Body strike (sell 2)
+            upper_strike: Upper wing strike (buy 1, further away = broken wing)
+            expiration: Option expiration date
+            num_contracts: Number of broken wing butterflies
+            option_type: "call" or "put" (default: "call")
+
+        Returns:
+            OrderResult with order ID and status
+        """
+        pass

@@ -1446,3 +1446,342 @@ class AlpacaClient(BaseBrokerClient):
                     }
                 )
             raise RuntimeError(error_msg) from e
+
+    def submit_jade_lizard_order(
+        self,
+        symbol: str,
+        put_strike: float,
+        call_short_strike: float,
+        call_long_strike: float,
+        expiration: date,
+        num_contracts: int,
+    ) -> OrderResult:
+        """Submit a Jade Lizard order via Alpaca/Lumibot.
+
+        Jade Lizard structure (neutral-to-bullish, no upside risk if structured correctly):
+        - Sell 1 OTM put (collect premium, bullish on downside)
+        - Sell 1 OTM call (collect premium)
+        - Buy 1 further OTM call (protection against unlimited upside risk)
+
+        Args:
+            symbol: Stock symbol
+            put_strike: OTM put strike to sell (below current price)
+            call_short_strike: OTM call strike to sell (above current price)
+            call_long_strike: Further OTM call strike to buy (protection)
+            expiration: Option expiration date
+            num_contracts: Number of jade lizards
+
+        Returns:
+            OrderResult with order ID and status
+        """
+        try:
+            exp_str = expiration.strftime("%y%m%d")
+            put_str = f"{int(put_strike * 1000):08d}"
+            call_short_str = f"{int(call_short_strike * 1000):08d}"
+            call_long_str = f"{int(call_long_strike * 1000):08d}"
+
+            put_symbol = f"{symbol}{exp_str}P{put_str}"
+            call_short_symbol = f"{symbol}{exp_str}C{call_short_str}"
+            call_long_symbol = f"{symbol}{exp_str}C{call_long_str}"
+
+            if self.logger:
+                self.logger.log_info(
+                    f"Submitting Jade Lizard for {symbol}",
+                    {
+                        "symbol": symbol,
+                        "put_strike": put_strike,
+                        "call_short_strike": call_short_strike,
+                        "call_long_strike": call_long_strike,
+                        "expiration": expiration.isoformat(),
+                        "num_contracts": num_contracts,
+                        "strategy": "jade_lizard",
+                        "broker": "Alpaca",
+                    },
+                )
+
+            # Create option assets
+            put_asset = Asset(symbol=put_symbol, asset_type="option")
+            call_short_asset = Asset(symbol=call_short_symbol, asset_type="option")
+            call_long_asset = Asset(symbol=call_long_symbol, asset_type="option")
+
+            # Submit orders
+            order_ids = []
+
+            # Sell OTM put
+            put_order = self.broker.create_order(
+                asset=put_asset, quantity=num_contracts, side="sell", order_type="market"
+            )
+            put_result = self.broker.submit_order(put_order)
+            if put_result:
+                order_ids.append(f"Sell Put:{put_result.identifier}")
+
+            # Sell OTM call
+            call_short_order = self.broker.create_order(
+                asset=call_short_asset, quantity=num_contracts, side="sell", order_type="market"
+            )
+            call_short_result = self.broker.submit_order(call_short_order)
+            if call_short_result:
+                order_ids.append(f"Sell Call:{call_short_result.identifier}")
+
+            # Buy OTM call (protection)
+            call_long_order = self.broker.create_order(
+                asset=call_long_asset, quantity=num_contracts, side="buy", order_type="market"
+            )
+            call_long_result = self.broker.submit_order(call_long_order)
+            if call_long_result:
+                order_ids.append(f"Buy Call:{call_long_result.identifier}")
+
+            if len(order_ids) == 3:
+                if self.logger:
+                    self.logger.log_info(
+                        f"Jade Lizard submitted for {symbol}",
+                        {"order_ids": order_ids, "strategy": "jade_lizard"},
+                    )
+                return OrderResult(
+                    success=True,
+                    order_id="|".join(order_ids),
+                    status="submitted",
+                    error_message=None,
+                )
+            else:
+                return OrderResult(
+                    success=False,
+                    order_id="|".join(order_ids) if order_ids else None,
+                    status="partial",
+                    error_message=f"Only {len(order_ids)}/3 legs submitted",
+                )
+
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Jade Lizard failed for {symbol}: {str(e)}", e)
+            return OrderResult(
+                success=False, order_id=None, status="error", error_message=str(e)
+            )
+
+    def submit_big_lizard_order(
+        self,
+        symbol: str,
+        straddle_strike: float,
+        call_long_strike: float,
+        expiration: date,
+        num_contracts: int,
+    ) -> OrderResult:
+        """Submit a Big Lizard order via Alpaca/Lumibot.
+
+        Big Lizard structure (aggressive premium collection with upside protection):
+        - Sell 1 ATM put (at straddle strike)
+        - Sell 1 ATM call (at straddle strike)
+        - Buy 1 OTM call (protection against unlimited upside risk)
+
+        Args:
+            symbol: Stock symbol
+            straddle_strike: ATM strike for short straddle (put + call)
+            call_long_strike: OTM call strike to buy (protection)
+            expiration: Option expiration date
+            num_contracts: Number of big lizards
+
+        Returns:
+            OrderResult with order ID and status
+        """
+        try:
+            exp_str = expiration.strftime("%y%m%d")
+            straddle_str = f"{int(straddle_strike * 1000):08d}"
+            call_long_str = f"{int(call_long_strike * 1000):08d}"
+
+            put_symbol = f"{symbol}{exp_str}P{straddle_str}"
+            call_short_symbol = f"{symbol}{exp_str}C{straddle_str}"
+            call_long_symbol = f"{symbol}{exp_str}C{call_long_str}"
+
+            if self.logger:
+                self.logger.log_info(
+                    f"Submitting Big Lizard for {symbol}",
+                    {
+                        "symbol": symbol,
+                        "straddle_strike": straddle_strike,
+                        "call_long_strike": call_long_strike,
+                        "expiration": expiration.isoformat(),
+                        "num_contracts": num_contracts,
+                        "strategy": "big_lizard",
+                        "broker": "Alpaca",
+                    },
+                )
+
+            # Create option assets
+            put_asset = Asset(symbol=put_symbol, asset_type="option")
+            call_short_asset = Asset(symbol=call_short_symbol, asset_type="option")
+            call_long_asset = Asset(symbol=call_long_symbol, asset_type="option")
+
+            # Submit orders
+            order_ids = []
+
+            # Sell ATM put
+            put_order = self.broker.create_order(
+                asset=put_asset, quantity=num_contracts, side="sell", order_type="market"
+            )
+            put_result = self.broker.submit_order(put_order)
+            if put_result:
+                order_ids.append(f"Sell Put:{put_result.identifier}")
+
+            # Sell ATM call
+            call_short_order = self.broker.create_order(
+                asset=call_short_asset, quantity=num_contracts, side="sell", order_type="market"
+            )
+            call_short_result = self.broker.submit_order(call_short_order)
+            if call_short_result:
+                order_ids.append(f"Sell Call:{call_short_result.identifier}")
+
+            # Buy OTM call (protection)
+            call_long_order = self.broker.create_order(
+                asset=call_long_asset, quantity=num_contracts, side="buy", order_type="market"
+            )
+            call_long_result = self.broker.submit_order(call_long_order)
+            if call_long_result:
+                order_ids.append(f"Buy Call:{call_long_result.identifier}")
+
+            if len(order_ids) == 3:
+                if self.logger:
+                    self.logger.log_info(
+                        f"Big Lizard submitted for {symbol}",
+                        {"order_ids": order_ids, "strategy": "big_lizard"},
+                    )
+                return OrderResult(
+                    success=True,
+                    order_id="|".join(order_ids),
+                    status="submitted",
+                    error_message=None,
+                )
+            else:
+                return OrderResult(
+                    success=False,
+                    order_id="|".join(order_ids) if order_ids else None,
+                    status="partial",
+                    error_message=f"Only {len(order_ids)}/3 legs submitted",
+                )
+
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Big Lizard failed for {symbol}: {str(e)}", e)
+            return OrderResult(
+                success=False, order_id=None, status="error", error_message=str(e)
+            )
+
+    def submit_broken_wing_butterfly_order(
+        self,
+        symbol: str,
+        lower_strike: float,
+        middle_strike: float,
+        upper_strike: float,
+        expiration: date,
+        num_contracts: int,
+        option_type: str = "call",
+    ) -> OrderResult:
+        """Submit a Broken Wing Butterfly order via Alpaca/Lumibot.
+
+        Broken Wing Butterfly structure (asymmetric butterfly, can be done for credit):
+        - Buy 1 lower strike option
+        - Sell 2 middle strike options
+        - Buy 1 upper strike option (further away than normal butterfly)
+
+        Args:
+            symbol: Stock symbol
+            lower_strike: Lower wing strike (buy 1)
+            middle_strike: Body strike (sell 2)
+            upper_strike: Upper wing strike (buy 1, further away = broken wing)
+            expiration: Option expiration date
+            num_contracts: Number of broken wing butterflies
+            option_type: "call" or "put" (default: "call")
+
+        Returns:
+            OrderResult with order ID and status
+        """
+        try:
+            exp_str = expiration.strftime("%y%m%d")
+            lower_str = f"{int(lower_strike * 1000):08d}"
+            middle_str = f"{int(middle_strike * 1000):08d}"
+            upper_str = f"{int(upper_strike * 1000):08d}"
+
+            type_char = "C" if option_type.lower() == "call" else "P"
+
+            lower_symbol = f"{symbol}{exp_str}{type_char}{lower_str}"
+            middle_symbol = f"{symbol}{exp_str}{type_char}{middle_str}"
+            upper_symbol = f"{symbol}{exp_str}{type_char}{upper_str}"
+
+            lower_width = middle_strike - lower_strike
+            upper_width = upper_strike - middle_strike
+
+            if self.logger:
+                self.logger.log_info(
+                    f"Submitting Broken Wing Butterfly for {symbol}",
+                    {
+                        "symbol": symbol,
+                        "lower_strike": lower_strike,
+                        "middle_strike": middle_strike,
+                        "upper_strike": upper_strike,
+                        "lower_wing_width": lower_width,
+                        "upper_wing_width": upper_width,
+                        "option_type": option_type,
+                        "expiration": expiration.isoformat(),
+                        "num_contracts": num_contracts,
+                        "strategy": "broken_wing_butterfly",
+                        "broker": "Alpaca",
+                    },
+                )
+
+            # Create option assets
+            lower_asset = Asset(symbol=lower_symbol, asset_type="option")
+            middle_asset = Asset(symbol=middle_symbol, asset_type="option")
+            upper_asset = Asset(symbol=upper_symbol, asset_type="option")
+
+            # Submit orders
+            order_ids = []
+
+            # Buy lower strike
+            lower_order = self.broker.create_order(
+                asset=lower_asset, quantity=num_contracts, side="buy", order_type="market"
+            )
+            lower_result = self.broker.submit_order(lower_order)
+            if lower_result:
+                order_ids.append(f"Buy Lower:{lower_result.identifier}")
+
+            # Sell 2x middle strike
+            middle_order = self.broker.create_order(
+                asset=middle_asset, quantity=num_contracts * 2, side="sell", order_type="market"
+            )
+            middle_result = self.broker.submit_order(middle_order)
+            if middle_result:
+                order_ids.append(f"Sell 2x Middle:{middle_result.identifier}")
+
+            # Buy upper strike
+            upper_order = self.broker.create_order(
+                asset=upper_asset, quantity=num_contracts, side="buy", order_type="market"
+            )
+            upper_result = self.broker.submit_order(upper_order)
+            if upper_result:
+                order_ids.append(f"Buy Upper:{upper_result.identifier}")
+
+            if len(order_ids) == 3:
+                if self.logger:
+                    self.logger.log_info(
+                        f"Broken Wing Butterfly submitted for {symbol}",
+                        {"order_ids": order_ids, "strategy": "broken_wing_butterfly"},
+                    )
+                return OrderResult(
+                    success=True,
+                    order_id="|".join(order_ids),
+                    status="submitted",
+                    error_message=None,
+                )
+            else:
+                return OrderResult(
+                    success=False,
+                    order_id="|".join(order_ids) if order_ids else None,
+                    status="partial",
+                    error_message=f"Only {len(order_ids)}/3 legs submitted",
+                )
+
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Broken Wing Butterfly failed for {symbol}: {str(e)}", e)
+            return OrderResult(
+                success=False, order_id=None, status="error", error_message=str(e)
+            )

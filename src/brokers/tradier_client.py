@@ -412,6 +412,160 @@ class TradierClient(BaseBrokerClient):
                 )
             raise ValueError(error_msg) from e
 
+    def get_available_strikes(self, symbol: str, expiration: date, option_type: str = None) -> List[float]:
+        """Get available strike prices for a symbol and expiration from Tradier API.
+        
+        This method returns ONLY real strikes from the Tradier API, never synthetic.
+        Use this to ensure all strike calculations use actual tradeable strikes.
+        
+        Args:
+            symbol: Stock symbol (e.g., 'SPX', 'SPXW', 'SPY')
+            expiration: Option expiration date
+            option_type: Optional filter for 'call' or 'put' (default: all)
+            
+        Returns:
+            Sorted list of available strike prices
+            
+        Raises:
+            ValueError: If no strikes available or API error
+        """
+        try:
+            import requests
+            
+            base_url = "https://sandbox.tradier.com" if self.is_sandbox else "https://api.tradier.com"
+            expiration_str = expiration.strftime("%Y-%m-%d")
+            
+            # Use Tradier REST API to get option strikes
+            response = requests.get(
+                f"{base_url}/v1/markets/options/strikes",
+                params={
+                    "symbol": symbol,
+                    "expiration": expiration_str
+                },
+                headers={
+                    "Authorization": f"Bearer {self.api_token}",
+                    "Accept": "application/json"
+                }
+            )
+            
+            if response.status_code != 200:
+                error_msg = f"Tradier API error getting strikes: {response.status_code} - {response.text}"
+                if self.logger:
+                    self.logger.log_error(
+                        f"Failed to get strikes for {symbol}",
+                        None,
+                        {"symbol": symbol, "expiration": expiration_str, "status_code": response.status_code}
+                    )
+                raise ValueError(error_msg)
+            
+            data = response.json()
+            strikes_data = data.get("strikes")
+            
+            if not strikes_data:
+                error_msg = f"No strikes available for {symbol} expiration {expiration_str}"
+                if self.logger:
+                    self.logger.log_error(error_msg, None, {"symbol": symbol, "response": data})
+                raise ValueError(error_msg)
+            
+            strike_list = strikes_data.get("strike", [])
+            
+            if not strike_list:
+                error_msg = f"No strikes available for {symbol} expiration {expiration_str}"
+                if self.logger:
+                    self.logger.log_error(error_msg, None, {"symbol": symbol, "response": data})
+                raise ValueError(error_msg)
+            
+            # Ensure it's a list
+            if isinstance(strike_list, (int, float)):
+                strike_list = [strike_list]
+            
+            # Convert to floats and sort
+            strikes = sorted([float(s) for s in strike_list])
+            
+            if self.logger:
+                self.logger.log_info(
+                    f"Retrieved {len(strikes)} strikes for {symbol}",
+                    {
+                        "symbol": symbol,
+                        "expiration": expiration_str,
+                        "strike_count": len(strikes),
+                        "min_strike": min(strikes) if strikes else None,
+                        "max_strike": max(strikes) if strikes else None
+                    }
+                )
+            
+            return strikes
+            
+        except ValueError:
+            raise
+        except Exception as e:
+            error_msg = f"Unexpected error getting strikes for {symbol}: {str(e)}"
+            if self.logger:
+                self.logger.log_error(error_msg, e, {"symbol": symbol, "error_type": type(e).__name__})
+            raise ValueError(error_msg) from e
+
+    def find_nearest_strike(self, target: float, available_strikes: List[float]) -> float:
+        """Find the nearest available strike to a target price.
+        
+        Args:
+            target: Target strike price
+            available_strikes: List of available strikes from API
+            
+        Returns:
+            Nearest available strike
+            
+        Raises:
+            ValueError: If no strikes available
+        """
+        if not available_strikes:
+            raise ValueError("No available strikes provided")
+        
+        return min(available_strikes, key=lambda x: abs(x - target))
+    
+    def find_nearest_strike_below(self, target: float, available_strikes: List[float]) -> float:
+        """Find the nearest available strike at or below target.
+        
+        Args:
+            target: Target strike price
+            available_strikes: List of available strikes from API
+            
+        Returns:
+            Nearest available strike at or below target
+            
+        Raises:
+            ValueError: If no strikes available below target
+        """
+        if not available_strikes:
+            raise ValueError("No available strikes provided")
+        
+        strikes_below = [s for s in available_strikes if s <= target]
+        if not strikes_below:
+            raise ValueError(f"No strikes available at or below ${target:.2f}")
+        
+        return max(strikes_below)
+    
+    def find_nearest_strike_above(self, target: float, available_strikes: List[float]) -> float:
+        """Find the nearest available strike at or above target.
+        
+        Args:
+            target: Target strike price
+            available_strikes: List of available strikes from API
+            
+        Returns:
+            Nearest available strike at or above target
+            
+        Raises:
+            ValueError: If no strikes available above target
+        """
+        if not available_strikes:
+            raise ValueError("No available strikes provided")
+        
+        strikes_above = [s for s in available_strikes if s >= target]
+        if not strikes_above:
+            raise ValueError(f"No strikes available at or above ${target:.2f}")
+        
+        return min(strikes_above)
+
     def get_option_chain(self, symbol: str, expiration: date) -> List[OptionContract]:
         """Get option chain for a symbol and expiration date using Tradier REST API.
         
@@ -526,19 +680,18 @@ class TradierClient(BaseBrokerClient):
             
             if not options:
                 if self.logger:
-                    self.logger.log_warning(
-                        f"No options from Tradier API for {symbol} expiration {expiration_str} - generating synthetic strikes",
+                    self.logger.log_error(
+                        f"No options from Tradier API for {symbol} expiration {expiration_str}",
+                        None,
                         {"symbol": symbol, "expiration": expiration_str, "status_code": response.status_code}
                     )
                 
-                # Fall back to synthetic strikes only if API returns nothing
-                options = self._generate_synthetic_strikes(symbol, expiration)
-                
-                if self.logger:
-                    self.logger.log_info(
-                        f"Generated {len(options)} synthetic strikes for {symbol}",
-                        {"symbol": symbol, "strike_count": len(options)}
-                    )
+                # Do NOT fall back to synthetic strikes - raise error instead
+                # This ensures we only trade with real market data
+                raise ValueError(
+                    f"No real option data available for {symbol} expiration {expiration_str}. "
+                    f"Market may be closed or no options exist for this expiration."
+                )
             
             if self.logger:
                 call_count = len([opt for opt in options if opt.option_type == "call"])
@@ -2252,14 +2405,19 @@ class TradierClient(BaseBrokerClient):
                                 )
                                 option_chains[exp_date].append(contract)
 
-            # If no real data available, generate synthetic data for requested expirations
+            # If no real data available, raise error instead of using synthetic data
             for exp_date in expirations:
                 if exp_date not in option_chains or not option_chains[exp_date]:
                     if self.logger:
-                        self.logger.log_warning(
-                            f"No option data from API for {symbol} {exp_date} - generating synthetic strikes"
+                        self.logger.log_error(
+                            f"No option data from API for {symbol} {exp_date}",
+                            None,
+                            {"symbol": symbol, "expiration": exp_date.isoformat()}
                         )
-                    option_chains[exp_date] = self._generate_synthetic_strikes(symbol, exp_date)
+                    raise ValueError(
+                        f"No real option data available for {symbol} expiration {exp_date}. "
+                        f"Market may be closed or no options exist for this expiration."
+                    )
 
             if self.logger:
                 total_contracts = sum(len(contracts) for contracts in option_chains.values())
@@ -2706,3 +2864,456 @@ class TradierClient(BaseBrokerClient):
                     }
                 )
             raise RuntimeError(error_msg) from e
+
+    def submit_jade_lizard_order(
+        self,
+        symbol: str,
+        put_strike: float,
+        call_short_strike: float,
+        call_long_strike: float,
+        expiration: date,
+        num_contracts: int,
+    ) -> OrderResult:
+        """Submit a Jade Lizard order to Tradier.
+
+        Jade Lizard structure (neutral-to-bullish, no upside risk if structured correctly):
+        - Sell 1 OTM put (collect premium, bullish on downside)
+        - Sell 1 OTM call (collect premium)
+        - Buy 1 further OTM call (protection against unlimited upside risk)
+
+        The key is: call spread width should be <= put premium collected
+        This eliminates upside risk while collecting premium on both sides.
+
+        Risk Profile:
+        - Max Profit: Net credit received (if stock stays between put and short call)
+        - Max Loss on Downside: Put strike - net credit (if stock drops below put)
+        - Max Loss on Upside: Zero (if call spread width <= put premium)
+        - Breakeven: Put strike - net credit received
+
+        Args:
+            symbol: Stock symbol
+            put_strike: OTM put strike to sell (below current price)
+            call_short_strike: OTM call strike to sell (above current price)
+            call_long_strike: Further OTM call strike to buy (protection)
+            expiration: Option expiration date
+            num_contracts: Number of jade lizards
+
+        Returns:
+            OrderResult with order ID and status
+        """
+        try:
+            import requests
+
+            base_url = (
+                "https://sandbox.tradier.com"
+                if self.is_sandbox
+                else "https://api.tradier.com"
+            )
+
+            # Format expiration and strikes
+            exp_str = expiration.strftime("%y%m%d")
+            put_str = f"{int(put_strike * 1000):08d}"
+            call_short_str = f"{int(call_short_strike * 1000):08d}"
+            call_long_str = f"{int(call_long_strike * 1000):08d}"
+
+            # Option symbols
+            put_symbol = f"{symbol}{exp_str}P{put_str}"  # Sell OTM put
+            call_short_symbol = f"{symbol}{exp_str}C{call_short_str}"  # Sell OTM call
+            call_long_symbol = f"{symbol}{exp_str}C{call_long_str}"  # Buy further OTM call
+
+            if self.logger:
+                self.logger.log_info(
+                    f"Submitting Jade Lizard for {symbol}",
+                    {
+                        "symbol": symbol,
+                        "put_strike": put_strike,
+                        "call_short_strike": call_short_strike,
+                        "call_long_strike": call_long_strike,
+                        "call_spread_width": call_long_strike - call_short_strike,
+                        "expiration": expiration.isoformat(),
+                        "num_contracts": num_contracts,
+                        "strategy": "jade_lizard",
+                    },
+                )
+
+            # Submit 3 orders for Jade Lizard
+            orders = [
+                {"symbol": put_symbol, "side": "sell_to_open", "desc": "Sell OTM Put"},
+                {"symbol": call_short_symbol, "side": "sell_to_open", "desc": "Sell OTM Call"},
+                {"symbol": call_long_symbol, "side": "buy_to_open", "desc": "Buy OTM Call (Protection)"},
+            ]
+
+            order_ids = []
+            for order in orders:
+                order_data = {
+                    "class": "option",
+                    "symbol": symbol,
+                    "option_symbol": order["symbol"],
+                    "side": order["side"],
+                    "quantity": num_contracts,
+                    "type": "market",
+                    "duration": "day",
+                }
+
+                response = requests.post(
+                    f"{base_url}/v1/accounts/{self.account_id}/orders",
+                    data=order_data,
+                    headers={
+                        "Authorization": f"Bearer {self.api_token}",
+                        "Accept": "application/json",
+                    },
+                )
+
+                if response.status_code in [200, 201]:
+                    result_data = response.json()
+                    order_id = result_data.get("order", {}).get("id")
+                    order_ids.append(f"{order['desc']}:{order_id}")
+                else:
+                    if self.logger:
+                        self.logger.log_error(
+                            f"Failed to submit {order['desc']}: {response.text}"
+                        )
+
+            if len(order_ids) == 3:
+                result = OrderResult(
+                    success=True,
+                    order_id="|".join(order_ids),
+                    status="submitted",
+                    error_message=None,
+                )
+
+                if self.logger:
+                    self.logger.log_info(
+                        f"Jade Lizard submitted for {symbol}",
+                        {
+                            "symbol": symbol,
+                            "put_strike": put_strike,
+                            "call_short_strike": call_short_strike,
+                            "call_long_strike": call_long_strike,
+                            "expiration": expiration.isoformat(),
+                            "num_contracts": num_contracts,
+                            "order_ids": order_ids,
+                            "strategy": "jade_lizard",
+                        },
+                    )
+                return result
+            else:
+                return OrderResult(
+                    success=False,
+                    order_id="|".join(order_ids) if order_ids else None,
+                    status="partial",
+                    error_message=f"Only {len(order_ids)}/3 legs submitted",
+                )
+
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Jade Lizard failed for {symbol}: {str(e)}", e)
+            return OrderResult(
+                success=False, order_id=None, status="error", error_message=str(e)
+            )
+
+    def submit_big_lizard_order(
+        self,
+        symbol: str,
+        straddle_strike: float,
+        call_long_strike: float,
+        expiration: date,
+        num_contracts: int,
+    ) -> OrderResult:
+        """Submit a Big Lizard order to Tradier.
+
+        Big Lizard structure (aggressive premium collection with upside protection):
+        - Sell 1 ATM put (at straddle strike)
+        - Sell 1 ATM call (at straddle strike)
+        - Buy 1 OTM call (protection against unlimited upside risk)
+
+        More aggressive than Jade Lizard - higher premium but more downside risk.
+        Essentially a short straddle with a long call for protection.
+
+        Risk Profile:
+        - Max Profit: Net credit received (if stock stays at straddle strike)
+        - Max Loss on Downside: Unlimited (stock can go to zero)
+        - Max Loss on Upside: Call spread width - net credit (limited by long call)
+        - Breakeven (lower): Straddle strike - net credit
+        - Breakeven (upper): Straddle strike + net credit (but capped by long call)
+
+        Args:
+            symbol: Stock symbol
+            straddle_strike: ATM strike for short straddle (put + call)
+            call_long_strike: OTM call strike to buy (protection)
+            expiration: Option expiration date
+            num_contracts: Number of big lizards
+
+        Returns:
+            OrderResult with order ID and status
+        """
+        try:
+            import requests
+
+            base_url = (
+                "https://sandbox.tradier.com"
+                if self.is_sandbox
+                else "https://api.tradier.com"
+            )
+
+            # Format expiration and strikes
+            exp_str = expiration.strftime("%y%m%d")
+            straddle_str = f"{int(straddle_strike * 1000):08d}"
+            call_long_str = f"{int(call_long_strike * 1000):08d}"
+
+            # Option symbols
+            put_symbol = f"{symbol}{exp_str}P{straddle_str}"  # Sell ATM put
+            call_short_symbol = f"{symbol}{exp_str}C{straddle_str}"  # Sell ATM call
+            call_long_symbol = f"{symbol}{exp_str}C{call_long_str}"  # Buy OTM call
+
+            if self.logger:
+                self.logger.log_info(
+                    f"Submitting Big Lizard for {symbol}",
+                    {
+                        "symbol": symbol,
+                        "straddle_strike": straddle_strike,
+                        "call_long_strike": call_long_strike,
+                        "call_spread_width": call_long_strike - straddle_strike,
+                        "expiration": expiration.isoformat(),
+                        "num_contracts": num_contracts,
+                        "strategy": "big_lizard",
+                    },
+                )
+
+            # Submit 3 orders for Big Lizard
+            orders = [
+                {"symbol": put_symbol, "side": "sell_to_open", "desc": "Sell ATM Put"},
+                {"symbol": call_short_symbol, "side": "sell_to_open", "desc": "Sell ATM Call"},
+                {"symbol": call_long_symbol, "side": "buy_to_open", "desc": "Buy OTM Call (Protection)"},
+            ]
+
+            order_ids = []
+            for order in orders:
+                order_data = {
+                    "class": "option",
+                    "symbol": symbol,
+                    "option_symbol": order["symbol"],
+                    "side": order["side"],
+                    "quantity": num_contracts,
+                    "type": "market",
+                    "duration": "day",
+                }
+
+                response = requests.post(
+                    f"{base_url}/v1/accounts/{self.account_id}/orders",
+                    data=order_data,
+                    headers={
+                        "Authorization": f"Bearer {self.api_token}",
+                        "Accept": "application/json",
+                    },
+                )
+
+                if response.status_code in [200, 201]:
+                    result_data = response.json()
+                    order_id = result_data.get("order", {}).get("id")
+                    order_ids.append(f"{order['desc']}:{order_id}")
+                else:
+                    if self.logger:
+                        self.logger.log_error(
+                            f"Failed to submit {order['desc']}: {response.text}"
+                        )
+
+            if len(order_ids) == 3:
+                result = OrderResult(
+                    success=True,
+                    order_id="|".join(order_ids),
+                    status="submitted",
+                    error_message=None,
+                )
+
+                if self.logger:
+                    self.logger.log_info(
+                        f"Big Lizard submitted for {symbol}",
+                        {
+                            "symbol": symbol,
+                            "straddle_strike": straddle_strike,
+                            "call_long_strike": call_long_strike,
+                            "expiration": expiration.isoformat(),
+                            "num_contracts": num_contracts,
+                            "order_ids": order_ids,
+                            "strategy": "big_lizard",
+                        },
+                    )
+                return result
+            else:
+                return OrderResult(
+                    success=False,
+                    order_id="|".join(order_ids) if order_ids else None,
+                    status="partial",
+                    error_message=f"Only {len(order_ids)}/3 legs submitted",
+                )
+
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Big Lizard failed for {symbol}: {str(e)}", e)
+            return OrderResult(
+                success=False, order_id=None, status="error", error_message=str(e)
+            )
+
+    def submit_broken_wing_butterfly_order(
+        self,
+        symbol: str,
+        lower_strike: float,
+        middle_strike: float,
+        upper_strike: float,
+        expiration: date,
+        num_contracts: int,
+        option_type: str = "call",
+    ) -> OrderResult:
+        """Submit a Broken Wing Butterfly order to Tradier.
+
+        Broken Wing Butterfly structure (asymmetric butterfly, can be done for credit):
+        - Buy 1 lower strike option
+        - Sell 2 middle strike options
+        - Buy 1 upper strike option (further away than normal butterfly)
+
+        The "broken" wing means unequal distances between strikes.
+        Example: Buy 100, Sell 2x 105, Buy 115 (5 wide on lower, 10 wide on upper)
+
+        Risk Profile:
+        - Max Profit: At middle strike (like regular butterfly)
+        - Risk on Narrow Side: Zero if done for credit
+        - Risk on Wide Side: Wide wing width - narrow wing width - credit received
+        - Breakeven: Depends on credit/debit and wing widths
+
+        Key Advantage: Can be entered for a credit, eliminating risk on one side.
+
+        Args:
+            symbol: Stock symbol
+            lower_strike: Lower wing strike (buy 1)
+            middle_strike: Body strike (sell 2)
+            upper_strike: Upper wing strike (buy 1, further away = broken wing)
+            expiration: Option expiration date
+            num_contracts: Number of broken wing butterflies
+            option_type: "call" or "put" (default: "call")
+
+        Returns:
+            OrderResult with order ID and status
+        """
+        try:
+            import requests
+
+            base_url = (
+                "https://sandbox.tradier.com"
+                if self.is_sandbox
+                else "https://api.tradier.com"
+            )
+
+            # Format expiration and strikes
+            exp_str = expiration.strftime("%y%m%d")
+            lower_str = f"{int(lower_strike * 1000):08d}"
+            middle_str = f"{int(middle_strike * 1000):08d}"
+            upper_str = f"{int(upper_strike * 1000):08d}"
+
+            # Option type character
+            type_char = "C" if option_type.lower() == "call" else "P"
+
+            # Option symbols
+            lower_symbol = f"{symbol}{exp_str}{type_char}{lower_str}"  # Buy 1
+            middle_symbol = f"{symbol}{exp_str}{type_char}{middle_str}"  # Sell 2
+            upper_symbol = f"{symbol}{exp_str}{type_char}{upper_str}"  # Buy 1
+
+            # Calculate wing widths for logging
+            lower_width = middle_strike - lower_strike
+            upper_width = upper_strike - middle_strike
+
+            if self.logger:
+                self.logger.log_info(
+                    f"Submitting Broken Wing Butterfly for {symbol}",
+                    {
+                        "symbol": symbol,
+                        "lower_strike": lower_strike,
+                        "middle_strike": middle_strike,
+                        "upper_strike": upper_strike,
+                        "lower_wing_width": lower_width,
+                        "upper_wing_width": upper_width,
+                        "option_type": option_type,
+                        "expiration": expiration.isoformat(),
+                        "num_contracts": num_contracts,
+                        "strategy": "broken_wing_butterfly",
+                        "is_broken": lower_width != upper_width,
+                    },
+                )
+
+            # Submit 3 orders for Broken Wing Butterfly
+            # Note: Middle strike needs 2x quantity
+            orders = [
+                {"symbol": lower_symbol, "side": "buy_to_open", "qty": num_contracts, "desc": f"Buy Lower {option_type.title()}"},
+                {"symbol": middle_symbol, "side": "sell_to_open", "qty": num_contracts * 2, "desc": f"Sell 2x Middle {option_type.title()}"},
+                {"symbol": upper_symbol, "side": "buy_to_open", "qty": num_contracts, "desc": f"Buy Upper {option_type.title()}"},
+            ]
+
+            order_ids = []
+            for order in orders:
+                order_data = {
+                    "class": "option",
+                    "symbol": symbol,
+                    "option_symbol": order["symbol"],
+                    "side": order["side"],
+                    "quantity": order["qty"],
+                    "type": "market",
+                    "duration": "day",
+                }
+
+                response = requests.post(
+                    f"{base_url}/v1/accounts/{self.account_id}/orders",
+                    data=order_data,
+                    headers={
+                        "Authorization": f"Bearer {self.api_token}",
+                        "Accept": "application/json",
+                    },
+                )
+
+                if response.status_code in [200, 201]:
+                    result_data = response.json()
+                    order_id = result_data.get("order", {}).get("id")
+                    order_ids.append(f"{order['desc']}:{order_id}")
+                else:
+                    if self.logger:
+                        self.logger.log_error(
+                            f"Failed to submit {order['desc']}: {response.text}"
+                        )
+
+            if len(order_ids) == 3:
+                result = OrderResult(
+                    success=True,
+                    order_id="|".join(order_ids),
+                    status="submitted",
+                    error_message=None,
+                )
+
+                if self.logger:
+                    self.logger.log_info(
+                        f"Broken Wing Butterfly submitted for {symbol}",
+                        {
+                            "symbol": symbol,
+                            "lower_strike": lower_strike,
+                            "middle_strike": middle_strike,
+                            "upper_strike": upper_strike,
+                            "option_type": option_type,
+                            "expiration": expiration.isoformat(),
+                            "num_contracts": num_contracts,
+                            "order_ids": order_ids,
+                            "strategy": "broken_wing_butterfly",
+                        },
+                    )
+                return result
+            else:
+                return OrderResult(
+                    success=False,
+                    order_id="|".join(order_ids) if order_ids else None,
+                    status="partial",
+                    error_message=f"Only {len(order_ids)}/3 legs submitted",
+                )
+
+        except Exception as e:
+            if self.logger:
+                self.logger.log_error(f"Broken Wing Butterfly failed for {symbol}: {str(e)}", e)
+            return OrderResult(
+                success=False, order_id=None, status="error", error_message=str(e)
+            )

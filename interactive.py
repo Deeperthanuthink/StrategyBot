@@ -158,10 +158,25 @@ def select_strategy(symbol, shares_owned):
     print("  └─────┴──────────────────┴──────────────────────────┘")
     
     print()
+    print("🔹 LIZARD STRATEGIES (Premium Collection)")
+    print("  ┌─────┬──────────────────┬──────────────────────────┐")
+    print("  │ jl  │ Jade Lizard      │ No upside risk if done right│")
+    print("  │ bl  │ Big Lizard ⚠️    │ Short straddle + call hedge │")
+    print("  └─────┴──────────────────┴──────────────────────────┘")
+    
+    print()
+    print("🔹 0DTE STRATEGIES (SPX/SPY/QQQ)")
+    print("  ┌─────┬──────────────────┬──────────────────────────┐")
+    print("  │metf │ METF Strategy    │ EMA-based 0DTE spreads    │")
+    print("  └─────┴──────────────────┴──────────────────────────┘")
+    print("     Supports: SPX (30pt), SPY (3pt), QQQ (4pt) spreads")
+    
+    print()
     print("🔹 ADVANCED STRATEGIES (QQQ Only)")
     print("  ┌─────┬──────────────────┬──────────────────────────┐")
     print("  │ dc  │ Double Calendar  │ Time decay profit strategy│")
     print("  │ bf  │ Butterfly        │ Low-cost defined risk     │")
+    print("  │ bwb │ Broken Wing BF   │ Asymmetric butterfly      │")
     print("  └─────┴──────────────────┴──────────────────────────┘")
     
     print()
@@ -169,7 +184,7 @@ def select_strategy(symbol, shares_owned):
     while True:
         try:
             choice = (
-                input("  Enter strategy (pc/pcs/cs/cc/ws/lcc/tcc/dc/bf/mp/ls/ib/ss/ic): ").strip().lower()
+                input("  Enter strategy (pc/pcs/cs/cc/ws/lcc/tcc/dc/bf/bwb/mp/ls/ib/ss/ic/jl/bl/metf): ").strip().lower()
             )
 
             if choice == "pc":
@@ -233,9 +248,35 @@ def select_strategy(symbol, shares_owned):
             elif choice == "ic":
                 print("  ✅ Selected: Iron Condor")
                 return "ic"
+            elif choice == "jl":
+                print("  ✅ Selected: Jade Lizard")
+                print("     📝 Neutral-to-bullish: Sell OTM put + sell OTM call + buy further OTM call")
+                print("     💡 No upside risk if call spread width ≤ put premium")
+                return "jl"
+            elif choice == "bl":
+                print("  ⚠️ WARNING: Big Lizard has UNDEFINED DOWNSIDE RISK!")
+                print("  ✅ Selected: Big Lizard")
+                print("     📝 Aggressive: Sell ATM straddle + buy OTM call for upside protection")
+                return "bl"
+            elif choice == "bwb":
+                print("  ✅ Selected: Broken Wing Butterfly on QQQ")
+                print("     📝 Asymmetric butterfly: Can be done for credit, risk only on one side")
+                return "bwb"
+            elif choice == "metf":
+                print("  ✅ Selected: METF Strategy (0DTE Credit Spreads)")
+                print()
+                print("     📊 Supported Symbols:")
+                print("        • SPX/SPXW: 25-35 pt spreads, $1.25-$2.50 credit")
+                print("        • SPY: 2-5 pt spreads, $0.15-$0.35 credit")
+                print("        • QQQ: 3-6 pt spreads, $0.15-$0.40 credit")
+                print()
+                print("     ⏰ Entry times: 12:30, 1:00, 1:30, 2:00, 2:30, 2:45 PM EST")
+                print("     📈 20 EMA > 40 EMA → Put Credit Spread (bullish)")
+                print("     📉 20 EMA < 40 EMA → Call Credit Spread (bearish)")
+                return "metf"
             else:
                 print(
-                    "  ❌ Enter 'pc', 'pcs', 'cs', 'cc', 'ws', 'lcc', 'tcc', 'dc', 'bf', 'mp', 'ls', 'ib', 'ss', or 'ic'"
+                    "  ❌ Enter 'pc', 'pcs', 'cs', 'cc', 'ws', 'lcc', 'tcc', 'dc', 'bf', 'bwb', 'mp', 'ls', 'ib', 'ss', 'ic', 'jl', 'bl', or 'metf'"
                 )
 
         except KeyboardInterrupt:
@@ -257,11 +298,15 @@ def confirm_execution(symbol, strategy, shares_owned):
         "tcc": "Tiered Covered Calls",
         "dc": "Double Calendar (QQQ)",
         "bf": "Butterfly (QQQ)",
+        "bwb": "Broken Wing Butterfly (QQQ)",
         "mp": "Married Put",
         "ls": "Long Straddle",
         "ib": "Iron Butterfly",
         "ss": "Short Strangle ⚠️",
-        "ic": "Iron Condor"
+        "ic": "Iron Condor",
+        "jl": "Jade Lizard",
+        "bl": "Big Lizard ⚠️",
+        "metf": "METF Strategy (SPX 0DTE)"
     }
     strategy_name = strategy_names.get(strategy, strategy)
 
@@ -338,6 +383,50 @@ def confirm_execution(symbol, strategy, shares_owned):
         print(f"  Call spread: ~3% above price ($5 wide)")
         print(f"  Expiry:     ~30 days out")
         print(f"  Profit:     Stock stays between short strikes")
+    if strategy == "jl":
+        print(f"  Action:     Sell OTM put + Sell OTM call + Buy further OTM call")
+        print(f"  Put:        ~5% below current price (sell)")
+        print(f"  Short Call: ~5% above current price (sell)")
+        print(f"  Long Call:  ~10% above current price (buy protection)")
+        print(f"  Expiry:     ~30 days out")
+        print(f"  Profit:     Stock stays between put and short call")
+        print(f"  💡 Key:     No upside risk if call spread width ≤ put premium")
+    if strategy == "bl":
+        print(f"  ⚠️ WARNING: UNDEFINED DOWNSIDE RISK!")
+        print(f"  Action:     Sell ATM straddle + Buy OTM call")
+        print(f"  Straddle:   At-the-money (sell put + call)")
+        print(f"  Long Call:  ~10% above current price (buy protection)")
+        print(f"  Expiry:     ~30 days out")
+        print(f"  Profit:     Stock stays near straddle strike")
+        print(f"  Risk:       Unlimited on downside, limited on upside")
+    if strategy == "bwb":
+        print(f"  Symbol:     QQQ (overrides selection)")
+        print(f"  Action:     Buy 1 lower / Sell 2 middle / Buy 1 upper call")
+        print(f"  Structure:  Asymmetric butterfly (unequal wing widths)")
+        print(f"  Lower wing: $5 wide (narrow)")
+        print(f"  Upper wing: $10 wide (broken/wide)")
+        print(f"  Expiry:     ~30 days out")
+        print(f"  💡 Key:     Can be done for credit, risk only on wide side")
+    if strategy == "metf":
+        print(f"  Symbol:     {symbol} (0DTE options)")
+        print(f"  Strategy:   EMA Trend Following Credit Spreads")
+        print(f"  ⏰ Entry:    12:30, 1:00, 1:30, 2:00, 2:30, 2:45 PM EST")
+        print(f"  📊 Signal:  1-min 20 EMA vs 40 EMA crossover")
+        print(f"     • 20 EMA > 40 EMA → Put Credit Spread (bullish)")
+        print(f"     • 20 EMA < 40 EMA → Call Credit Spread (bearish)")
+        # Show symbol-specific parameters
+        if symbol.upper() in ["SPX", "SPXW"]:
+            print(f"  Width:      25, 30, or 35 points")
+            print(f"  Credit:     $1.25 - $2.50 target per spread")
+        elif symbol.upper() == "SPY":
+            print(f"  Width:      2, 3, 4, or 5 points")
+            print(f"  Credit:     $0.15 - $0.35 target per spread")
+        elif symbol.upper() == "QQQ":
+            print(f"  Width:      3, 4, 5, or 6 points")
+            print(f"  Credit:     $0.15 - $0.40 target per spread")
+        print(f"  Stop:       1x credit received (100% of premium)")
+        print(f"  Hold:       Till expiration")
+        print(f"  ⚠️ Avoid:   FOMC days and FOMC Minutes days")
     print()
 
     while True:
@@ -645,19 +734,24 @@ def confirm_tiered_execution(plan):
     print("  • Check your broker platform for real-time order status")
     
     print()
+    print("  ⚠️  WARNING: These orders will be submitted to your broker!")
+    print("  ⚠️  Real money will be at risk. Review carefully.")
+    print()
     
     while True:
         try:
-            confirm = input("  Execute tiered covered call strategy? (y/n): ").strip().lower()
+            confirm = input("  🔐 Type 'CONFIRM' to execute or 'cancel' to abort: ").strip()
             
-            if confirm in ["y", "yes"]:
+            if confirm.upper() == "CONFIRM":
+                print()
                 print("  ✅ Execution confirmed!")
                 return True
-            elif confirm in ["n", "no"]:
+            elif confirm.lower() in ["cancel", "no", "n", "abort"]:
+                print()
                 print("  🚫 Execution cancelled")
                 return False
             else:
-                print("  ❌ Please enter 'y' or 'n'")
+                print("  ❌ Please type 'CONFIRM' to proceed or 'cancel' to abort")
                 
         except KeyboardInterrupt:
             print("\n\n  👋 Goodbye!")
@@ -941,19 +1035,24 @@ def confirm_roll_execution(roll_plan):
     print("  • Check your broker platform for real-time execution status")
     
     print()
+    print("  ⚠️  WARNING: These orders will be submitted to your broker!")
+    print("  ⚠️  Real money will be at risk. Review carefully.")
+    print()
     
     while True:
         try:
-            confirm = input("  Execute covered call rolls? (y/n): ").strip().lower()
+            confirm = input("  🔐 Type 'CONFIRM' to execute or 'cancel' to abort: ").strip()
             
-            if confirm in ["y", "yes"]:
+            if confirm.upper() == "CONFIRM":
+                print()
                 print("  ✅ Roll execution confirmed!")
                 return True
-            elif confirm in ["n", "no"]:
+            elif confirm.lower() in ["cancel", "no", "n", "abort"]:
+                print()
                 print("  🚫 Roll execution cancelled")
                 return False
             else:
-                print("  ❌ Please enter 'y' or 'n'")
+                print("  ❌ Please type 'CONFIRM' to proceed or 'cancel' to abort")
                 
         except KeyboardInterrupt:
             print("\n\n  👋 Goodbye!")
@@ -1741,6 +1840,854 @@ def initialize_broker():
     return config, broker_client
 
 
+def calculate_planned_orders(trading_bot, symbol, strategy):
+    """Calculate planned orders for verification display.
+    
+    This function calculates what orders would be placed without actually
+    submitting them, allowing the user to review before execution.
+    
+    Args:
+        trading_bot: Initialized TradingBot instance
+        symbol: Stock symbol
+        strategy: Strategy code
+        
+    Returns:
+        List of order dictionaries with details for display
+    """
+    from datetime import date, timedelta
+    
+    planned_orders = []
+    
+    try:
+        # Get current price
+        current_price = trading_bot.broker_client.get_current_price(symbol)
+        
+        if strategy == "pcs":
+            # Put Credit Spread
+            short_strike = trading_bot.strategy_calculator.calculate_short_strike(
+                current_price=current_price,
+                offset_percent=trading_bot.config.strike_offset_percent,
+                offset_dollars=trading_bot.config.strike_offset_dollars,
+            )
+            long_strike = trading_bot.strategy_calculator.calculate_long_strike(
+                short_strike=short_strike,
+                spread_width=trading_bot.config.spread_width
+            )
+            expiration = trading_bot.strategy_calculator.calculate_expiration_date(
+                execution_date=date.today(),
+                offset_weeks=trading_bot.config.expiration_offset_weeks,
+            )
+            
+            planned_orders.append({
+                'type': 'spread',
+                'action': 'SELL',
+                'spread_type': 'credit',
+                'short_strike': short_strike,
+                'long_strike': long_strike,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': trading_bot.config.contract_quantity,
+                'option_type': 'PUT',
+                'estimated_price': 0.50  # Placeholder - would need option chain data
+            })
+            
+        elif strategy == "cc":
+            # Covered Call
+            call_strike = current_price * (1 + trading_bot.config.covered_call_offset_percent / 100)
+            if trading_bot.config.covered_call_offset_dollars:
+                call_strike = current_price + trading_bot.config.covered_call_offset_dollars
+            call_strike = round(call_strike)
+            expiration = date.today() + timedelta(days=trading_bot.config.covered_call_expiration_days)
+            
+            planned_orders.append({
+                'type': 'option',
+                'action': 'SELL',
+                'strike': call_strike,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': 1,
+                'option_type': 'CALL',
+                'estimated_price': 0
+            })
+            
+        elif strategy in ["pc", "cs"]:
+            # Protected Collar / Collar Strategy
+            put_strike = current_price * (1 - trading_bot.config.collar_put_offset_percent / 100)
+            call_strike = current_price * (1 + trading_bot.config.collar_call_offset_percent / 100)
+            put_strike = round(put_strike)
+            call_strike = round(call_strike)
+            expiration = date.today() + timedelta(weeks=trading_bot.config.expiration_offset_weeks)
+            
+            planned_orders.append({
+                'type': 'option',
+                'action': 'BUY',
+                'strike': put_strike,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': 1,
+                'option_type': 'PUT',
+                'estimated_price': 0
+            })
+            planned_orders.append({
+                'type': 'option',
+                'action': 'SELL',
+                'strike': call_strike,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': 1,
+                'option_type': 'CALL',
+                'estimated_price': 0
+            })
+            
+        elif strategy == "ws":
+            # Wheel Strategy
+            # Check if we have shares (covered call) or not (cash-secured put)
+            position = trading_bot.broker_client.get_position(symbol)
+            has_shares = position and position.quantity >= 100
+            
+            if has_shares:
+                # Covered call phase
+                call_strike = current_price * (1 + trading_bot.config.wheel_call_offset_percent / 100)
+                call_strike = round(call_strike)
+                expiration = date.today() + timedelta(days=trading_bot.config.wheel_expiration_days)
+                
+                planned_orders.append({
+                    'type': 'option',
+                    'action': 'SELL',
+                    'strike': call_strike,
+                    'expiration': expiration.strftime('%m/%d/%Y'),
+                    'quantity': position.quantity // 100,
+                    'option_type': 'CALL',
+                    'estimated_price': 0
+                })
+            else:
+                # Cash-secured put phase
+                put_strike = current_price * (1 - trading_bot.config.wheel_put_offset_percent / 100)
+                put_strike = round(put_strike)
+                expiration = date.today() + timedelta(days=trading_bot.config.wheel_expiration_days)
+                
+                planned_orders.append({
+                    'type': 'option',
+                    'action': 'SELL',
+                    'strike': put_strike,
+                    'expiration': expiration.strftime('%m/%d/%Y'),
+                    'quantity': 1,
+                    'option_type': 'PUT',
+                    'estimated_price': 0
+                })
+                
+        elif strategy == "mp":
+            # Married Put
+            put_strike = current_price * (1 - trading_bot.config.mp_put_offset_percent / 100)
+            put_strike = round(put_strike)
+            expiration = date.today() + timedelta(days=trading_bot.config.mp_expiration_days)
+            
+            planned_orders.append({
+                'type': 'stock',
+                'action': 'BUY',
+                'strike': current_price,
+                'expiration': 'N/A',
+                'quantity': 100,
+                'option_type': 'SHARES',
+                'estimated_price': current_price
+            })
+            planned_orders.append({
+                'type': 'option',
+                'action': 'BUY',
+                'strike': put_strike,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': 1,
+                'option_type': 'PUT',
+                'estimated_price': 0
+            })
+            
+        elif strategy == "ls":
+            # Long Straddle
+            atm_strike = round(current_price)
+            expiration = date.today() + timedelta(days=trading_bot.config.ls_expiration_days)
+            
+            planned_orders.append({
+                'type': 'option',
+                'action': 'BUY',
+                'strike': atm_strike,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': trading_bot.config.ls_num_contracts,
+                'option_type': 'CALL',
+                'estimated_price': 0
+            })
+            planned_orders.append({
+                'type': 'option',
+                'action': 'BUY',
+                'strike': atm_strike,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': trading_bot.config.ls_num_contracts,
+                'option_type': 'PUT',
+                'estimated_price': 0
+            })
+            
+        elif strategy == "ib":
+            # Iron Butterfly
+            atm_strike = round(current_price)
+            wing_width = trading_bot.config.ib_wing_width
+            expiration = date.today() + timedelta(days=trading_bot.config.ib_expiration_days)
+            
+            planned_orders.append({
+                'type': 'option',
+                'action': 'BUY',
+                'strike': atm_strike - wing_width,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': trading_bot.config.ib_num_contracts,
+                'option_type': 'PUT',
+                'estimated_price': 0
+            })
+            planned_orders.append({
+                'type': 'option',
+                'action': 'SELL',
+                'strike': atm_strike,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': trading_bot.config.ib_num_contracts,
+                'option_type': 'PUT',
+                'estimated_price': 0
+            })
+            planned_orders.append({
+                'type': 'option',
+                'action': 'SELL',
+                'strike': atm_strike,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': trading_bot.config.ib_num_contracts,
+                'option_type': 'CALL',
+                'estimated_price': 0
+            })
+            planned_orders.append({
+                'type': 'option',
+                'action': 'BUY',
+                'strike': atm_strike + wing_width,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': trading_bot.config.ib_num_contracts,
+                'option_type': 'CALL',
+                'estimated_price': 0
+            })
+            
+        elif strategy == "ic":
+            # Iron Condor
+            put_short = current_price * (1 - trading_bot.config.ic_put_spread_offset_percent / 100)
+            call_short = current_price * (1 + trading_bot.config.ic_call_spread_offset_percent / 100)
+            put_short = round(put_short)
+            call_short = round(call_short)
+            spread_width = trading_bot.config.ic_spread_width
+            expiration = date.today() + timedelta(days=trading_bot.config.ic_expiration_days)
+            
+            planned_orders.append({
+                'type': 'spread',
+                'action': 'SELL',
+                'spread_type': 'credit',
+                'short_strike': put_short,
+                'long_strike': put_short - spread_width,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': trading_bot.config.ic_num_contracts,
+                'option_type': 'PUT SPREAD',
+                'estimated_price': 0
+            })
+            planned_orders.append({
+                'type': 'spread',
+                'action': 'SELL',
+                'spread_type': 'credit',
+                'short_strike': call_short,
+                'long_strike': call_short + spread_width,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': trading_bot.config.ic_num_contracts,
+                'option_type': 'CALL SPREAD',
+                'estimated_price': 0
+            })
+            
+        elif strategy == "ss":
+            # Short Strangle
+            put_strike = current_price * (1 - trading_bot.config.ss_put_offset_percent / 100)
+            call_strike = current_price * (1 + trading_bot.config.ss_call_offset_percent / 100)
+            put_strike = round(put_strike)
+            call_strike = round(call_strike)
+            expiration = date.today() + timedelta(days=trading_bot.config.ss_expiration_days)
+            
+            planned_orders.append({
+                'type': 'option',
+                'action': 'SELL',
+                'strike': put_strike,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': trading_bot.config.ss_num_contracts,
+                'option_type': 'PUT',
+                'estimated_price': 0
+            })
+            planned_orders.append({
+                'type': 'option',
+                'action': 'SELL',
+                'strike': call_strike,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': trading_bot.config.ss_num_contracts,
+                'option_type': 'CALL',
+                'estimated_price': 0
+            })
+            
+        elif strategy == "jl":
+            # Jade Lizard
+            put_strike = current_price * 0.95  # ~5% OTM put
+            call_short = current_price * 1.05  # ~5% OTM short call
+            call_long = current_price * 1.10   # ~10% OTM long call
+            put_strike = round(put_strike)
+            call_short = round(call_short)
+            call_long = round(call_long)
+            expiration = date.today() + timedelta(days=30)
+            
+            planned_orders.append({
+                'type': 'option',
+                'action': 'SELL',
+                'strike': put_strike,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': 1,
+                'option_type': 'PUT',
+                'estimated_price': 0
+            })
+            planned_orders.append({
+                'type': 'option',
+                'action': 'SELL',
+                'strike': call_short,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': 1,
+                'option_type': 'CALL',
+                'estimated_price': 0
+            })
+            planned_orders.append({
+                'type': 'option',
+                'action': 'BUY',
+                'strike': call_long,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': 1,
+                'option_type': 'CALL',
+                'estimated_price': 0
+            })
+            
+        elif strategy == "bl":
+            # Big Lizard
+            atm_strike = round(current_price)
+            call_long = current_price * 1.10  # ~10% OTM long call
+            call_long = round(call_long)
+            expiration = date.today() + timedelta(days=30)
+            
+            planned_orders.append({
+                'type': 'option',
+                'action': 'SELL',
+                'strike': atm_strike,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': 1,
+                'option_type': 'PUT',
+                'estimated_price': 0
+            })
+            planned_orders.append({
+                'type': 'option',
+                'action': 'SELL',
+                'strike': atm_strike,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': 1,
+                'option_type': 'CALL',
+                'estimated_price': 0
+            })
+            planned_orders.append({
+                'type': 'option',
+                'action': 'BUY',
+                'strike': call_long,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': 1,
+                'option_type': 'CALL',
+                'estimated_price': 0
+            })
+            
+        elif strategy == "dc":
+            # Double Calendar
+            put_strike = current_price * (1 - trading_bot.config.dc_put_offset_percent / 100)
+            call_strike = current_price * (1 + trading_bot.config.dc_call_offset_percent / 100)
+            put_strike = round(put_strike)
+            call_strike = round(call_strike)
+            short_exp = date.today() + timedelta(days=trading_bot.config.dc_short_days)
+            long_exp = date.today() + timedelta(days=trading_bot.config.dc_long_days)
+            
+            # Put calendar
+            planned_orders.append({
+                'type': 'option',
+                'action': 'SELL',
+                'strike': put_strike,
+                'expiration': short_exp.strftime('%m/%d/%Y'),
+                'quantity': 1,
+                'option_type': 'PUT (short exp)',
+                'estimated_price': 0
+            })
+            planned_orders.append({
+                'type': 'option',
+                'action': 'BUY',
+                'strike': put_strike,
+                'expiration': long_exp.strftime('%m/%d/%Y'),
+                'quantity': 1,
+                'option_type': 'PUT (long exp)',
+                'estimated_price': 0
+            })
+            # Call calendar
+            planned_orders.append({
+                'type': 'option',
+                'action': 'SELL',
+                'strike': call_strike,
+                'expiration': short_exp.strftime('%m/%d/%Y'),
+                'quantity': 1,
+                'option_type': 'CALL (short exp)',
+                'estimated_price': 0
+            })
+            planned_orders.append({
+                'type': 'option',
+                'action': 'BUY',
+                'strike': call_strike,
+                'expiration': long_exp.strftime('%m/%d/%Y'),
+                'quantity': 1,
+                'option_type': 'CALL (long exp)',
+                'estimated_price': 0
+            })
+            
+        elif strategy == "bf":
+            # Butterfly
+            atm_strike = round(current_price)
+            wing_width = trading_bot.config.bf_wing_width
+            expiration = date.today() + timedelta(days=trading_bot.config.bf_expiration_days)
+            
+            planned_orders.append({
+                'type': 'option',
+                'action': 'BUY',
+                'strike': atm_strike - wing_width,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': 1,
+                'option_type': 'CALL',
+                'estimated_price': 0
+            })
+            planned_orders.append({
+                'type': 'option',
+                'action': 'SELL',
+                'strike': atm_strike,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': 2,
+                'option_type': 'CALL',
+                'estimated_price': 0
+            })
+            planned_orders.append({
+                'type': 'option',
+                'action': 'BUY',
+                'strike': atm_strike + wing_width,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': 1,
+                'option_type': 'CALL',
+                'estimated_price': 0
+            })
+            
+        elif strategy == "bwb":
+            # Broken Wing Butterfly
+            atm_strike = round(current_price)
+            lower_wing = 5
+            upper_wing = 10
+            expiration = date.today() + timedelta(days=30)
+            
+            planned_orders.append({
+                'type': 'option',
+                'action': 'BUY',
+                'strike': atm_strike - lower_wing,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': 1,
+                'option_type': 'CALL',
+                'estimated_price': 0
+            })
+            planned_orders.append({
+                'type': 'option',
+                'action': 'SELL',
+                'strike': atm_strike,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': 2,
+                'option_type': 'CALL',
+                'estimated_price': 0
+            })
+            planned_orders.append({
+                'type': 'option',
+                'action': 'BUY',
+                'strike': atm_strike + upper_wing,
+                'expiration': expiration.strftime('%m/%d/%Y'),
+                'quantity': 1,
+                'option_type': 'CALL',
+                'estimated_price': 0
+            })
+            
+        elif strategy == "metf":
+            # METF Strategy - 0DTE Credit Spreads
+            from src.strategy.metf_strategy import (
+                METFStrategy,
+                SYMBOL_CONFIGS,
+                TrendDirection,
+            )
+
+            # Get symbol config
+            symbol_upper = symbol.upper()
+            if symbol_upper in SYMBOL_CONFIGS:
+                config = SYMBOL_CONFIGS[symbol_upper]
+                spread_width = config.default_spread_width
+                otm_offset = config.otm_offset
+            else:
+                spread_width = 30
+                otm_offset = 15
+
+            # Check if market is open
+            is_market_open = False
+            try:
+                is_market_open = trading_bot.broker_client.is_market_open()
+            except Exception:
+                pass
+
+            # METF requires real-time EMA data from 1-minute charts
+            # Since we don't have historical bar data API, we need user input for direction
+            if not is_market_open:
+                print()
+                print(
+                    "  ⚠️  METF Strategy requires real-time EMA data from 1-minute charts."
+                )
+                print("  📊 Market is currently CLOSED - EMA signals unavailable.")
+                print()
+                print("  Please select the spread direction manually:")
+                print("    [P] PUT Credit Spread  - Use if you expect price to stay UP")
+                print(
+                    "    [C] CALL Credit Spread - Use if you expect price to stay DOWN"
+                )
+                print()
+
+                while True:
+                    direction = input("  Enter direction (P/C): ").strip().upper()
+                    if direction in ["P", "PUT"]:
+                        trend = TrendDirection.BULLISH
+                        spread_type_name = "PUT"
+                        signal_reason = "Manual selection: PUT Credit Spread (market closed)"
+                        short_strike = round(current_price - otm_offset)
+                        long_strike = short_strike - spread_width
+                        ema_20 = current_price
+                        ema_40 = current_price
+                        break
+                    elif direction in ["C", "CALL"]:
+                        trend = TrendDirection.BEARISH
+                        spread_type_name = "CALL"
+                        signal_reason = (
+                            "Manual selection: CALL Credit Spread (market closed)"
+                        )
+                        short_strike = round(current_price + otm_offset)
+                        long_strike = short_strike + spread_width
+                        ema_20 = current_price
+                        ema_40 = current_price
+                        break
+                    else:
+                        print("  ❌ Please enter 'P' for PUT or 'C' for CALL")
+            else:
+                # Market is open - in production, fetch real 1-min bars and calculate EMAs
+                # For now, we still need user input since we don't have bar data API
+                print()
+                print("  📊 METF Strategy - EMA Signal Selection")
+                print()
+                print(
+                    "  ℹ️  In production, this would use real-time 1-minute EMA crossover."
+                )
+                print(
+                    "  📈 Check your charting platform for 20 EMA vs 40 EMA on 1-min chart."
+                )
+                print()
+                print("  Select based on your EMA analysis:")
+                print(
+                    "    [P] PUT Credit Spread  - 20 EMA > 40 EMA (BULLISH momentum)"
+                )
+                print(
+                    "    [C] CALL Credit Spread - 20 EMA < 40 EMA (BEARISH momentum)"
+                )
+                print()
+
+                while True:
+                    direction = input("  Enter direction (P/C): ").strip().upper()
+                    if direction in ["P", "PUT"]:
+                        trend = TrendDirection.BULLISH
+                        spread_type_name = "PUT"
+                        signal_reason = (
+                            "User confirmed: 20 EMA > 40 EMA → BULLISH → PUT Credit Spread"
+                        )
+                        short_strike = round(current_price - otm_offset)
+                        long_strike = short_strike - spread_width
+                        ema_20 = current_price * 1.001  # Slightly higher to indicate bullish
+                        ema_40 = current_price * 0.999
+                        break
+                    elif direction in ["C", "CALL"]:
+                        trend = TrendDirection.BEARISH
+                        spread_type_name = "CALL"
+                        signal_reason = "User confirmed: 20 EMA < 40 EMA → BEARISH → CALL Credit Spread"
+                        short_strike = round(current_price + otm_offset)
+                        long_strike = short_strike + spread_width
+                        ema_20 = current_price * 0.999  # Slightly lower to indicate bearish
+                        ema_40 = current_price * 1.001
+                        break
+                    else:
+                        print("  ❌ Please enter 'P' for PUT or 'C' for CALL")
+
+            expiration = date.today()  # 0DTE
+
+            planned_orders.append(
+                {
+                    "type": "spread",
+                    "action": "SELL",
+                    "spread_type": "credit",
+                    "short_strike": short_strike,
+                    "long_strike": long_strike,
+                    "expiration": expiration.strftime("%m/%d/%Y") + " (0DTE)",
+                    "quantity": 1,
+                    "option_type": spread_type_name,
+                    "estimated_price": (config.min_credit + config.max_credit) / 2
+                    if symbol_upper in SYMBOL_CONFIGS
+                    else 1.50,
+                    # METF-specific fields for justification
+                    "metf_signal": {
+                        "trend": trend.value,
+                        "ema_20": ema_20,
+                        "ema_40": ema_40,
+                        "reason": signal_reason,
+                        "spread_type": f"{spread_type_name} Credit Spread",
+                        "market_open": is_market_open,
+                    },
+                }
+            )
+            
+        elif strategy == "lcc":
+            # Laddered Covered Call
+            call_strike = current_price * (1 + trading_bot.config.laddered_call_offset_percent / 100)
+            call_strike = round(call_strike)
+            
+            for i in range(trading_bot.config.laddered_num_legs):
+                exp_date = date.today() + timedelta(weeks=i+1)
+                planned_orders.append({
+                    'type': 'option',
+                    'action': 'SELL',
+                    'strike': call_strike,
+                    'expiration': exp_date.strftime('%m/%d/%Y'),
+                    'quantity': 1,
+                    'option_type': f'CALL (Week {i+1})',
+                    'estimated_price': 0
+                })
+        
+        else:
+            # Generic fallback
+            planned_orders.append({
+                'type': 'option',
+                'action': 'UNKNOWN',
+                'strike': current_price,
+                'expiration': 'TBD',
+                'quantity': 1,
+                'option_type': 'OPTION',
+                'estimated_price': 0
+            })
+            
+    except Exception as e:
+        print(f"  ⚠️  Warning: Could not calculate all order details: {str(e)}")
+        # Return partial orders if any were calculated
+        if not planned_orders:
+            return None
+    
+    return planned_orders
+
+
+def verify_planned_orders(symbol, strategy, planned_orders):
+    """Display planned orders and get final verification before execution.
+    
+    This provides an additional layer of protection by showing exactly what
+    orders will be placed before submitting them to the broker.
+    
+    Args:
+        symbol: Stock symbol
+        strategy: Strategy code (e.g., 'pcs', 'cc', 'metf')
+        planned_orders: List of order details to display
+        
+    Returns:
+        bool: True if user confirms, False otherwise
+    """
+    strategy_names = {
+        "pc": "Protected Collar",
+        "pcs": "Put Credit Spread",
+        "cs": "Collar Strategy",
+        "cc": "Covered Call",
+        "ws": "Wheel Strategy",
+        "lcc": "Laddered Covered Call",
+        "tcc": "Tiered Covered Calls",
+        "dc": "Double Calendar",
+        "bf": "Butterfly",
+        "bwb": "Broken Wing Butterfly",
+        "mp": "Married Put",
+        "ls": "Long Straddle",
+        "ib": "Iron Butterfly",
+        "ss": "Short Strangle",
+        "ic": "Iron Condor",
+        "jl": "Jade Lizard",
+        "bl": "Big Lizard",
+        "metf": "METF Strategy"
+    }
+    strategy_name = strategy_names.get(strategy, strategy.upper())
+    
+    print()
+    print("╔" + "═" * 68 + "╗")
+    print("║" + " " * 20 + "⚠️  FINAL ORDER VERIFICATION" + " " * 20 + "║")
+    print("╚" + "═" * 68 + "╝")
+    print()
+    
+    print(f"  📋 Strategy: {strategy_name}")
+    print(f"  📈 Symbol:   {symbol}")
+    print()
+    
+    # Display METF signal justification if present
+    if strategy == "metf" and planned_orders:
+        metf_signal = planned_orders[0].get('metf_signal')
+        if metf_signal:
+            print("  ┌" + "─" * 66 + "┐")
+            print("  │" + " " * 18 + "📊 METF SIGNAL ANALYSIS" + " " * 25 + "│")
+            print("  ├" + "─" * 66 + "┤")
+            
+            trend = metf_signal.get('trend', 'unknown').upper()
+            ema_20 = metf_signal.get('ema_20', 0)
+            ema_40 = metf_signal.get('ema_40', 0)
+            reason = metf_signal.get('reason', '')
+            spread_type = metf_signal.get('spread_type', '')
+            
+            # Trend indicator
+            if trend == "BULLISH":
+                trend_icon = "📈"
+                trend_color = "BULLISH"
+            elif trend == "BEARISH":
+                trend_icon = "📉"
+                trend_color = "BEARISH"
+            else:
+                trend_icon = "➡️"
+                trend_color = "NEUTRAL"
+            
+            # Check if this was a manual selection
+            market_open = metf_signal.get('market_open', False)
+            is_manual = 'Manual selection' in reason or 'User confirmed' in reason
+            
+            print(f"  │ {trend_icon} Trend Direction: {trend_color:<47} │")
+            print(f"  │                                                                    │")
+            
+            if is_manual and not market_open:
+                print(f"  │ ⚠️  Market Status: CLOSED                                          │")
+                print(f"  │    EMA data unavailable - direction manually selected            │")
+                print(f"  │                                                                    │")
+            elif is_manual:
+                print(f"  │ ℹ️  Direction: User-confirmed based on external chart analysis    │")
+                print(f"  │                                                                    │")
+            
+            print(f"  │ 📐 EMA Analysis (1-minute chart):                                  │")
+            print(f"  │    • 20 EMA: ${ema_20:<54.2f} │")
+            print(f"  │    • 40 EMA: ${ema_40:<54.2f} │")
+            print(f"  │                                                                    │")
+            
+            # Signal explanation
+            if trend == "BULLISH":
+                print(f"  │ ✅ Signal: 20 EMA > 40 EMA                                         │")
+                print(f"  │    → Market showing BULLISH momentum                              │")
+                print(f"  │    → Selling PUT Credit Spread (profit if price stays up)        │")
+            elif trend == "BEARISH":
+                print(f"  │ ✅ Signal: 20 EMA < 40 EMA                                         │")
+                print(f"  │    → Market showing BEARISH momentum                              │")
+                print(f"  │    → Selling CALL Credit Spread (profit if price stays down)     │")
+            else:
+                print(f"  │ ⚠️  Signal: EMAs are close (neutral/unclear trend)                │")
+                print(f"  │    → Consider waiting for clearer signal                         │")
+            
+            print(f"  │                                                                    │")
+            print(f"  │ 🎯 Selected Strategy: {spread_type:<43} │")
+            print("  └" + "─" * 66 + "┘")
+            print()
+    
+    if not planned_orders:
+        print("  ❌ No orders to display")
+        return False
+    
+    print("  ┌" + "─" * 66 + "┐")
+    print("  │" + " " * 20 + "ORDERS TO BE SUBMITTED" + " " * 24 + "│")
+    print("  ├" + "─" * 66 + "┤")
+    
+    total_debit = 0.0
+    total_credit = 0.0
+    
+    for i, order in enumerate(planned_orders, 1):
+        order_type = order.get('type', 'Unknown')
+        action = order.get('action', 'Unknown')
+        strike = order.get('strike', 0)
+        expiration = order.get('expiration', 'N/A')
+        quantity = order.get('quantity', 1)
+        option_type = order.get('option_type', '')
+        est_price = order.get('estimated_price', 0)
+        
+        # Format the order line
+        if order_type == 'spread':
+            short_strike = order.get('short_strike', 0)
+            long_strike = order.get('long_strike', 0)
+            spread_type = order.get('spread_type', 'credit')
+            
+            print(f"  │ {i}. {action} {quantity}x {symbol} {option_type} {spread_type.upper()} SPREAD" + " " * max(0, 35 - len(f"{i}. {action} {quantity}x {symbol} {option_type} {spread_type.upper()} SPREAD")) + "│")
+            print(f"  │    Short: ${short_strike:<8.2f} | Long: ${long_strike:<8.2f} | Exp: {expiration:<10}" + " " * 5 + "│")
+            if est_price > 0:
+                if spread_type == 'credit':
+                    total_credit += est_price * quantity * 100
+                    print(f"  │    Est. Credit: ${est_price:.2f} per spread (${est_price * quantity * 100:.2f} total)" + " " * (66 - len(f"    Est. Credit: ${est_price:.2f} per spread (${est_price * quantity * 100:.2f} total)")) + "│")
+                else:
+                    total_debit += est_price * quantity * 100
+                    print(f"  │    Est. Debit: ${est_price:.2f} per spread (${est_price * quantity * 100:.2f} total)" + " " * (66 - len(f"    Est. Debit: ${est_price:.2f} per spread (${est_price * quantity * 100:.2f} total)")) + "│")
+        else:
+            # Single leg option
+            action_str = f"{action} {quantity}x {symbol} ${strike:.2f} {option_type.upper()}"
+            padding = 66 - len(f" {i}. {action_str}")
+            print(f"  │ {i}. {action_str}" + " " * max(0, padding) + "│")
+            print(f"  │    Expiration: {expiration}" + " " * (66 - len(f"    Expiration: {expiration}")) + "│")
+            if est_price > 0:
+                if action.upper() in ['SELL', 'STO', 'SELL TO OPEN']:
+                    total_credit += est_price * quantity * 100
+                    print(f"  │    Est. Credit: ${est_price:.2f} (${est_price * quantity * 100:.2f} total)" + " " * (66 - len(f"    Est. Credit: ${est_price:.2f} (${est_price * quantity * 100:.2f} total)")) + "│")
+                else:
+                    total_debit += est_price * quantity * 100
+                    print(f"  │    Est. Debit: ${est_price:.2f} (${est_price * quantity * 100:.2f} total)" + " " * (66 - len(f"    Est. Debit: ${est_price:.2f} (${est_price * quantity * 100:.2f} total)")) + "│")
+        
+        if i < len(planned_orders):
+            print("  │" + " " * 66 + "│")
+    
+    print("  ├" + "─" * 66 + "┤")
+    
+    # Summary
+    if total_credit > 0 or total_debit > 0:
+        net = total_credit - total_debit
+        if net >= 0:
+            print(f"  │ 💰 NET ESTIMATED CREDIT: ${net:,.2f}" + " " * (66 - len(f" 💰 NET ESTIMATED CREDIT: ${net:,.2f}")) + "│")
+        else:
+            print(f"  │ 💸 NET ESTIMATED DEBIT: ${abs(net):,.2f}" + " " * (66 - len(f" 💸 NET ESTIMATED DEBIT: ${abs(net):,.2f}")) + "│")
+    
+    print("  └" + "─" * 66 + "┘")
+    
+    print()
+    print("  ⚠️  WARNING: These orders will be submitted to your broker!")
+    print("  ⚠️  Real money will be at risk. Review carefully.")
+    print()
+    
+    while True:
+        try:
+            confirm = input("  🔐 Type 'CONFIRM' to execute or 'cancel' to abort: ").strip()
+            
+            if confirm.upper() == "CONFIRM":
+                print()
+                print("  ✅ Orders confirmed for execution!")
+                return True
+            elif confirm.lower() in ["cancel", "no", "n", "abort"]:
+                print()
+                print("  🚫 Order execution cancelled")
+                return False
+            else:
+                print("  ❌ Please type 'CONFIRM' to proceed or 'cancel' to abort")
+                
+        except KeyboardInterrupt:
+            print("\n\n  👋 Goodbye!")
+            sys.exit(0)
+
+
 def execute_trade(symbol, strategy):
     """Execute the selected trade."""
     suppress_output()
@@ -1748,7 +2695,7 @@ def execute_trade(symbol, strategy):
     try:
         print()
         print("═" * 60)
-        print("🚀 EXECUTING TRADE...")
+        print("🚀 PREPARING TRADE...")
         print("═" * 60)
         print()
 
@@ -1762,8 +2709,10 @@ def execute_trade(symbol, strategy):
         # For double calendar and butterfly, always use QQQ
         if strategy in ["dc", "bf"]:
             config_data["symbols"] = ["QQQ"]
+            actual_symbol = "QQQ"
         else:
             config_data["symbols"] = [symbol]
+            actual_symbol = symbol
         config_data["strategy"] = strategy
         config_data["run_immediately"] = True
 
@@ -1773,17 +2722,46 @@ def execute_trade(symbol, strategy):
             tmp_path = tmp.name
 
         try:
-            # Initialize trading bot with temp config
-            trading_bot = TradingBot(config_path=tmp_path, dry_run=False)
+            # Initialize trading bot with temp config (dry run first to calculate orders)
+            trading_bot = TradingBot(config_path=tmp_path, dry_run=True)
 
             print("  ⏳ Initializing...")
             if not trading_bot.initialize():
                 print("  ❌ Failed to initialize trading bot")
                 return False
 
+            # Calculate planned orders for verification
+            print("  ⏳ Calculating order parameters...")
+            planned_orders = calculate_planned_orders(trading_bot, actual_symbol, strategy)
+            
+            if not planned_orders:
+                print("  ❌ Could not calculate order parameters")
+                print("  💡 This might be due to:")
+                print("     • Market hours (options data unavailable)")
+                print("     • Insufficient option liquidity")
+                print("     • Network connectivity issues")
+                return False
+            
+            # Show verification prompt with planned orders
+            if not verify_planned_orders(actual_symbol, strategy, planned_orders):
+                return False
+            
+            # Now execute for real
+            print()
+            print("═" * 60)
+            print("🚀 EXECUTING TRADE...")
+            print("═" * 60)
+            print()
+            
+            # Re-initialize without dry run
+            trading_bot_real = TradingBot(config_path=tmp_path, dry_run=False)
+            if not trading_bot_real.initialize():
+                print("  ❌ Failed to initialize trading bot for execution")
+                return False
+
             print("  ⏳ Submitting order...")
             # Execute the trade
-            summary = trading_bot.execute_trading_cycle()
+            summary = trading_bot_real.execute_trading_cycle()
 
             # Display results
             print()
@@ -1806,16 +2784,20 @@ def execute_trade(symbol, strategy):
                     "ls": "Long Straddle",
                     "ib": "Iron Butterfly",
                     "ss": "Short Strangle",
-                    "ic": "Iron Condor"
+                    "ic": "Iron Condor",
+                    "jl": "Jade Lizard",
+                    "bl": "Big Lizard",
+                    "bwb": "Broken Wing Butterfly",
+                    "metf": "METF Strategy"
                 }
                 strategy_name = strategy_names.get(strategy, strategy)
                 print(f"  ✅ SUCCESS!")
-                print(f"     Stock:    {symbol}")
+                print(f"     Stock:    {actual_symbol}")
                 print(f"     Strategy: {strategy_name}")
                 print()
                 print("  📱 Check your broker dashboard for order details")
             else:
-                print(f"  ❌ FAILED: Trade failed for {symbol}")
+                print(f"  ❌ FAILED: Trade failed for {actual_symbol}")
                 print()
                 print("  📋 Check logs/trading_bot.log for details")
 
