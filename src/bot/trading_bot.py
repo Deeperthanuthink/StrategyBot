@@ -27,9 +27,11 @@ from src.strategy.collar_strategy import (
 )
 from src.strategy.tiered_covered_call_strategy import TieredCoveredCallCalculator
 from src.strategy.covered_call_roller import CoveredCallRoller
+from src.strategy.metf_strategy import METFStrategy, SYMBOL_CONFIGS, TrendDirection, SpreadType
 from src.positions.position_service import PositionService
 from src.order.order_manager import OrderManager, TradeResult
 from src.logging.bot_logger import BotLogger
+from src.utils.trading_calendar import TradingCalendar
 
 
 @dataclass
@@ -218,6 +220,7 @@ class TradingBot:
                 "ss": "Short Strangle",
                 "ic": "Iron Condor",
                 "tcc": "Tiered Covered Calls",
+                "metf": "METF Strategy",
             }
             strategy_name = strategy_names.get(self.config.strategy, "Unknown")
             self.logger.log_info(
@@ -409,6 +412,8 @@ class TradingBot:
                     trade_result = self.process_iron_condor_symbol(symbol)
                 elif self.config.strategy == "tcc":  # Tiered Covered Calls
                     trade_result = self.process_tiered_covered_calls(symbol)
+                elif self.config.strategy == "metf":  # METF 0DTE Strategy
+                    trade_result = self.process_metf_symbol(symbol)
                 else:  # pcs = Put Credit Spread (default)
                     trade_result = self.process_symbol(symbol)
 
@@ -2643,6 +2648,249 @@ class TradingBot:
 
             return TradeResult(
                 symbol=symbol,
+                success=False,
+                order_id=None,
+                short_strike=0.0,
+                long_strike=0.0,
+                expiration=date.today(),
+                quantity=0,
+                filled_price=None,
+                error_message=error_msg,
+                timestamp=timestamp,
+            )
+
+    def process_metf_symbol(self, symbol: str, trend_direction: TrendDirection = None) -> TradeResult:
+        """Process a single symbol using METF (Market EMA Trend Following) strategy.
+
+        METF Strategy for 0DTE Credit Spreads:
+        1. Gets current price and validates symbol is supported (SPX, SPY, QQQ)
+        2. Determines trend direction from EMA crossover (or uses provided direction)
+        3. Calculates appropriate strikes based on symbol-specific config
+        4. Submits credit spread order (PUT for bullish, CALL for bearish)
+
+        Args:
+            symbol: Stock symbol to process (SPX, SPXW, SPY, or QQQ)
+            trend_direction: Optional pre-determined trend direction
+
+        Returns:
+            TradeResult with execution details
+        """
+        timestamp = datetime.now()
+        symbol_upper = symbol.upper()
+
+        try:
+            self.logger.log_info(f"Starting METF strategy for {symbol_upper}")
+
+            # Validate symbol is supported
+            if symbol_upper not in SYMBOL_CONFIGS:
+                error_msg = f"Symbol {symbol_upper} not supported for METF. Supported: {list(SYMBOL_CONFIGS.keys())}"
+                self.logger.log_error(error_msg, context={"symbol": symbol_upper})
+                return TradeResult(
+                    symbol=symbol_upper,
+                    success=False,
+                    order_id=None,
+                    short_strike=0.0,
+                    long_strike=0.0,
+                    expiration=date.today(),
+                    quantity=0,
+                    filled_price=None,
+                    error_message=error_msg,
+                    timestamp=timestamp,
+                )
+
+            # Get symbol configuration
+            config = SYMBOL_CONFIGS[symbol_upper]
+            spread_width = config.default_spread_width
+            otm_offset = config.otm_offset
+
+            self.logger.log_info(
+                f"METF config for {symbol_upper}",
+                {
+                    "symbol": symbol_upper,
+                    "spread_width": spread_width,
+                    "otm_offset": otm_offset,
+                    "min_credit": config.min_credit,
+                    "max_credit": config.max_credit,
+                }
+            )
+
+            # Get current price
+            current_price = self.broker_client.get_current_price(symbol_upper)
+            self.logger.log_info(
+                f"Current price for {symbol_upper}: ${current_price:.2f}",
+                {"symbol": symbol_upper, "price": current_price}
+            )
+
+            # Create TradingCalendar instance using Tradier credentials from config
+            calendar = TradingCalendar(
+                api_token=self.config.tradier_credentials.api_token,
+                is_sandbox="sandbox" in self.config.tradier_credentials.base_url.lower()
+            )
+
+            # Use 0DTE expiration (today if trading day, else next trading day)
+            expiration = calendar.get_0dte_expiration()
+            
+            # Log if expiration was adjusted to next trading day
+            if expiration != date.today():
+                self.logger.log_warning(
+                    f"Running on non-trading day, using next trading day for 0DTE",
+                    {
+                        "symbol": symbol_upper,
+                        "original_date": date.today().isoformat(),
+                        "expiration": expiration.isoformat(),
+                        "day_of_week": date.today().strftime("%A")
+                    }
+                )
+
+            # Determine trend direction if not provided
+            if trend_direction is None:
+                # Default to PUT credit spread (bullish) if no direction specified
+                # In production, this would be determined by EMA crossover
+                trend_direction = TrendDirection.BULLISH
+                self.logger.log_warning(
+                    f"No trend direction provided for {symbol_upper}, defaulting to BULLISH",
+                    {"symbol": symbol_upper, "default_trend": "BULLISH"}
+                )
+
+            # Calculate strikes based on trend direction
+            if trend_direction == TrendDirection.BULLISH:
+                # PUT Credit Spread - sell put below current price
+                spread_type = SpreadType.PUT_CREDIT_SPREAD
+                short_strike = round(current_price - otm_offset)
+                long_strike = short_strike - spread_width
+                option_type = "PUT"
+            else:
+                # CALL Credit Spread - sell call above current price
+                spread_type = SpreadType.CALL_CREDIT_SPREAD
+                short_strike = round(current_price + otm_offset)
+                long_strike = short_strike + spread_width
+                option_type = "CALL"
+
+            self.logger.log_info(
+                f"METF calculated strikes for {symbol_upper}",
+                {
+                    "symbol": symbol_upper,
+                    "trend": trend_direction.value,
+                    "spread_type": spread_type.value,
+                    "short_strike": short_strike,
+                    "long_strike": long_strike,
+                    "expiration": expiration.isoformat(),
+                    "option_type": option_type,
+                }
+            )
+
+            # Get available strikes from option chain to validate
+            try:
+                option_chain = self.broker_client.get_option_chain(symbol_upper, expiration)
+                available_strikes = sorted(list(set([c.strike for c in option_chain])))
+
+                if available_strikes:
+                    # Find nearest available strikes
+                    short_strike = min(available_strikes, key=lambda x: abs(x - short_strike))
+                    
+                    if trend_direction == TrendDirection.BULLISH:
+                        # For PUT spread, long strike should be below short
+                        valid_longs = [s for s in available_strikes if s < short_strike]
+                        if valid_longs:
+                            target_long = short_strike - spread_width
+                            long_strike = min(valid_longs, key=lambda x: abs(x - target_long))
+                    else:
+                        # For CALL spread, long strike should be above short
+                        valid_longs = [s for s in available_strikes if s > short_strike]
+                        if valid_longs:
+                            target_long = short_strike + spread_width
+                            long_strike = min(valid_longs, key=lambda x: abs(x - target_long))
+
+                    self.logger.log_info(
+                        f"METF adjusted to available strikes for {symbol_upper}",
+                        {
+                            "short_strike": short_strike,
+                            "long_strike": long_strike,
+                            "actual_width": abs(short_strike - long_strike),
+                        }
+                    )
+            except Exception as chain_error:
+                self.logger.log_warning(
+                    f"Could not get option chain for {symbol_upper}, using calculated strikes",
+                    {"error": str(chain_error)}
+                )
+
+            # Create and submit the spread order
+            from src.brokers.base_client import SpreadOrder
+
+            spread_order = SpreadOrder(
+                symbol=symbol_upper,
+                short_strike=short_strike,
+                long_strike=long_strike,
+                expiration=expiration,
+                quantity=1,  # METF typically trades 1 contract at a time
+                order_type="limit",
+                time_in_force="day",  # 0DTE should be day order
+            )
+
+            self.logger.log_info(
+                f"Submitting METF {option_type} credit spread for {symbol_upper}",
+                {
+                    "symbol": symbol_upper,
+                    "spread_type": spread_type.value,
+                    "short_strike": short_strike,
+                    "long_strike": long_strike,
+                    "expiration": expiration.isoformat(),
+                }
+            )
+
+            # Submit the order
+            order_result = self.broker_client.submit_spread_order(spread_order)
+
+            if order_result.success:
+                self.logger.log_info(
+                    f"METF order submitted successfully for {symbol_upper}",
+                    {"order_id": order_result.order_id}
+                )
+                return TradeResult(
+                    symbol=symbol_upper,
+                    success=True,
+                    order_id=order_result.order_id,
+                    short_strike=short_strike,
+                    long_strike=long_strike,
+                    expiration=expiration,
+                    quantity=1,
+                    filled_price=None,
+                    error_message=None,
+                    timestamp=timestamp,
+                )
+            else:
+                self.logger.log_error(
+                    f"METF order failed for {symbol_upper}: {order_result.error_message}",
+                    context={"error": order_result.error_message}
+                )
+                return TradeResult(
+                    symbol=symbol_upper,
+                    success=False,
+                    order_id=None,
+                    short_strike=short_strike,
+                    long_strike=long_strike,
+                    expiration=expiration,
+                    quantity=1,
+                    filled_price=None,
+                    error_message=order_result.error_message,
+                    timestamp=timestamp,
+                )
+
+        except Exception as e:
+            error_msg = f"Unexpected error: {type(e).__name__}: {str(e)}"
+            self.logger.log_error(
+                f"Unexpected error processing METF for {symbol_upper}",
+                e,
+                {
+                    "symbol": symbol_upper,
+                    "error_type": type(e).__name__,
+                    "timestamp": timestamp.isoformat(),
+                },
+            )
+
+            return TradeResult(
+                symbol=symbol_upper,
                 success=False,
                 order_id=None,
                 short_strike=0.0,

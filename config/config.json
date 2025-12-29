@@ -119,7 +119,7 @@
     "tradier": {
       "api_token": "${TRADIER_API_TOKEN}",
       "account_id": "${TRADIER_ACCOUNT_ID}",
-      "base_url": "https://sandbox.tradier.com"
+      "base_url": "${TRADIER_BASE_URL}"
     }
   },
   "logging": {

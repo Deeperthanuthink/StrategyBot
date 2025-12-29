@@ -13,6 +13,7 @@ import tempfile
 import logging
 import warnings
 from datetime import date
+from src.utils.trading_calendar import TradingCalendar
 
 # Suppress noisy output BEFORE importing anything else
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -20,6 +21,26 @@ warnings.filterwarnings("ignore")
 logging.getLogger("lumibot").setLevel(logging.CRITICAL)
 logging.getLogger("urllib3").setLevel(logging.CRITICAL)
 logging.getLogger("apscheduler").setLevel(logging.CRITICAL)
+logging.getLogger("alpaca").setLevel(logging.CRITICAL)
+logging.getLogger("alpaca.trading.stream").setLevel(logging.CRITICAL)
+logging.getLogger("websockets").setLevel(logging.CRITICAL)
+
+# Suppress Alpaca websocket errors when using Tradier
+# This prevents "failed to authenticate" errors from Alpaca's background processes
+import threading
+_original_excepthook = threading.excepthook
+
+def _custom_excepthook(args):
+    """Custom exception hook to suppress Alpaca websocket errors."""
+    if args.exc_type == ValueError and "failed to authenticate" in str(args.exc_value):
+        # Silently ignore Alpaca websocket authentication errors
+        return
+    if "alpaca" in str(args.exc_value).lower() and "websocket" in str(args.exc_value).lower():
+        return
+    # For all other exceptions, use the original handler
+    _original_excepthook(args)
+
+threading.excepthook = _custom_excepthook
 
 from dotenv import load_dotenv
 
@@ -28,8 +49,18 @@ load_dotenv()
 
 def suppress_output():
     """Suppress noisy library output."""
-    # Suppress various loggers
-    for logger_name in ["lumibot", "urllib3", "apscheduler", "requests", "tradier"]:
+    # Suppress various loggers including Alpaca websocket noise
+    for logger_name in [
+        "lumibot",
+        "urllib3",
+        "apscheduler",
+        "requests",
+        "tradier",
+        "alpaca",
+        "alpaca.trading.stream",
+        "websockets",
+        "asyncio",
+    ]:
         logging.getLogger(logger_name).setLevel(logging.CRITICAL)
 
 
@@ -45,6 +76,110 @@ def display_banner():
     print("║" + " " * 15 + "🤖 OPTIONS TRADING BOT" + " " * 21 + "║")
     print("╚" + "═" * 58 + "╝")
     print()
+
+
+def select_trading_mode():
+    """Let user select between paper trading and live trading.
+    
+    Returns:
+        str: 'paper' or 'live'
+    """
+    print("╔" + "═" * 58 + "╗")
+    print("║" + " " * 15 + "⚠️  TRADING MODE SELECTION" + " " * 17 + "║")
+    print("╚" + "═" * 58 + "╝")
+    print()
+    print("  Please select your trading mode:")
+    print()
+    print("  ┌" + "─" * 54 + "┐")
+    print("  │  📝 PAPER TRADING                                   │")
+    print("  │      • Uses sandbox/paper trading account           │")
+    print("  │      • No real money at risk                        │")
+    print("  │      • Safe for testing strategies                  │")
+    print("  │      • Type 'PAPER' to select                       │")
+    print("  ├" + "─" * 54 + "┤")
+    print("  │  💰 LIVE TRADING                                    │")
+    print("  │      • Uses real brokerage account                  │")
+    print("  │      • REAL MONEY AT RISK!                          │")
+    print("  │      • Only use if you understand the risks         │")
+    print("  │      • Type 'LIVE' to select                        │")
+    print("  └" + "─" * 54 + "┘")
+    print()
+    
+    while True:
+        try:
+            choice = input("  Enter trading mode (PAPER/LIVE): ").strip().upper()
+            
+            if choice == "PAPER":
+                print()
+                print("  ✅ Paper Trading Mode selected")
+                print("     Using sandbox/paper trading credentials")
+                return "paper"
+            elif choice == "LIVE":
+                print()
+                print("  ⚠️  WARNING: You are about to use LIVE TRADING!")
+                print("  ⚠️  Real money will be at risk!")
+                print()
+                confirm = input("  Type 'I UNDERSTAND' to confirm live trading: ").strip()
+                
+                if confirm == "I UNDERSTAND":
+                    print()
+                    print("  🔴 LIVE TRADING MODE ACTIVATED")
+                    print("     Using production trading credentials")
+                    return "live"
+                else:
+                    print("  ❌ Live trading not confirmed. Please try again.")
+                    continue
+            else:
+                print("  ❌ Please type 'PAPER' or 'LIVE' (full word required)")
+                
+        except KeyboardInterrupt:
+            print("\n\n  👋 Goodbye!")
+            sys.exit(0)
+
+
+def set_trading_mode_env(mode: str):
+    """Set environment variables based on trading mode.
+    
+    Args:
+        mode: 'paper' or 'live'
+    """
+    if mode == "paper":
+        # Set paper trading credentials
+        # Tradier
+        paper_tradier_token = os.environ.get("TRADIER_PAPER_API_TOKEN", "")
+        paper_tradier_account = os.environ.get("TRADIER_PAPER_ACCOUNT_ID", "")
+        if paper_tradier_token:
+            os.environ["TRADIER_API_TOKEN"] = paper_tradier_token
+        if paper_tradier_account:
+            os.environ["TRADIER_ACCOUNT_ID"] = paper_tradier_account
+        os.environ["TRADIER_BASE_URL"] = "https://sandbox.tradier.com"
+        
+        # Alpaca
+        paper_alpaca_key = os.environ.get("ALPACA_PAPER_API_KEY", "")
+        paper_alpaca_secret = os.environ.get("ALPACA_PAPER_API_SECRET", "")
+        if paper_alpaca_key:
+            os.environ["ALPACA_API_KEY"] = paper_alpaca_key
+        if paper_alpaca_secret:
+            os.environ["ALPACA_API_SECRET"] = paper_alpaca_secret
+            
+    elif mode == "live":
+        # Set live trading credentials
+        # Tradier
+        live_tradier_token = os.environ.get("TRADIER_LIVE_API_TOKEN", "")
+        live_tradier_account = os.environ.get("TRADIER_LIVE_ACCOUNT_ID", "")
+        if live_tradier_token:
+            os.environ["TRADIER_API_TOKEN"] = live_tradier_token
+        if live_tradier_account:
+            os.environ["TRADIER_ACCOUNT_ID"] = live_tradier_account
+        os.environ["TRADIER_BASE_URL"] = "https://api.tradier.com"
+        
+        # Alpaca
+        live_alpaca_key = os.environ.get("ALPACA_LIVE_API_KEY", "")
+        live_alpaca_secret = os.environ.get("ALPACA_LIVE_API_SECRET", "")
+        if live_alpaca_key:
+            os.environ["ALPACA_API_KEY"] = live_alpaca_key
+        if live_alpaca_secret:
+            os.environ["ALPACA_API_SECRET"] = live_alpaca_secret
 
 
 def display_positions(positions):
@@ -2315,21 +2450,24 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
             
         elif strategy == "metf":
             # METF Strategy - 0DTE Credit Spreads
+            # This uses the SAME logic as TradingBot.process_metf_symbol()
             from src.strategy.metf_strategy import (
                 METFStrategy,
                 SYMBOL_CONFIGS,
                 TrendDirection,
+                SpreadType,
             )
 
             # Get symbol config
             symbol_upper = symbol.upper()
-            if symbol_upper in SYMBOL_CONFIGS:
-                config = SYMBOL_CONFIGS[symbol_upper]
-                spread_width = config.default_spread_width
-                otm_offset = config.otm_offset
-            else:
-                spread_width = 30
-                otm_offset = 15
+            if symbol_upper not in SYMBOL_CONFIGS:
+                print(f"  ❌ Symbol {symbol_upper} not supported for METF.")
+                print(f"     Supported symbols: {list(SYMBOL_CONFIGS.keys())}")
+                return None
+                
+            config = SYMBOL_CONFIGS[symbol_upper]
+            spread_width = config.default_spread_width
+            otm_offset = config.otm_offset
 
             # Check if market is open
             is_market_open = False
@@ -2360,21 +2498,11 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                         trend = TrendDirection.BULLISH
                         spread_type_name = "PUT"
                         signal_reason = "Manual selection: PUT Credit Spread (market closed)"
-                        short_strike = round(current_price - otm_offset)
-                        long_strike = short_strike - spread_width
-                        ema_20 = current_price
-                        ema_40 = current_price
                         break
                     elif direction in ["C", "CALL"]:
                         trend = TrendDirection.BEARISH
                         spread_type_name = "CALL"
-                        signal_reason = (
-                            "Manual selection: CALL Credit Spread (market closed)"
-                        )
-                        short_strike = round(current_price + otm_offset)
-                        long_strike = short_strike + spread_width
-                        ema_20 = current_price
-                        ema_40 = current_price
+                        signal_reason = "Manual selection: CALL Credit Spread (market closed)"
                         break
                     else:
                         print("  ❌ Please enter 'P' for PUT or 'C' for CALL")
@@ -2405,27 +2533,77 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                     if direction in ["P", "PUT"]:
                         trend = TrendDirection.BULLISH
                         spread_type_name = "PUT"
-                        signal_reason = (
-                            "User confirmed: 20 EMA > 40 EMA → BULLISH → PUT Credit Spread"
-                        )
-                        short_strike = round(current_price - otm_offset)
-                        long_strike = short_strike - spread_width
-                        ema_20 = current_price * 1.001  # Slightly higher to indicate bullish
-                        ema_40 = current_price * 0.999
+                        signal_reason = "User confirmed: 20 EMA > 40 EMA → BULLISH → PUT Credit Spread"
                         break
                     elif direction in ["C", "CALL"]:
                         trend = TrendDirection.BEARISH
                         spread_type_name = "CALL"
                         signal_reason = "User confirmed: 20 EMA < 40 EMA → BEARISH → CALL Credit Spread"
-                        short_strike = round(current_price + otm_offset)
-                        long_strike = short_strike + spread_width
-                        ema_20 = current_price * 0.999  # Slightly lower to indicate bearish
-                        ema_40 = current_price * 1.001
                         break
                     else:
                         print("  ❌ Please enter 'P' for PUT or 'C' for CALL")
 
-            expiration = date.today()  # 0DTE
+            # Calculate initial strikes based on trend (same as trading bot)
+            if trend == TrendDirection.BULLISH:
+                short_strike = round(current_price - otm_offset)
+                long_strike = short_strike - spread_width
+            else:
+                short_strike = round(current_price + otm_offset)
+                long_strike = short_strike + spread_width
+
+            # Use TradingCalendar to get 0DTE expiration
+            # Create calendar using credentials from trading_bot.config
+            calendar = TradingCalendar(
+                api_token=trading_bot.config.tradier_credentials.api_token,
+                is_sandbox="sandbox" in trading_bot.config.tradier_credentials.base_url.lower()
+            )
+            
+            expiration = calendar.get_0dte_expiration()
+            
+            # Display user-friendly message when expiration is adjusted
+            if expiration != date.today():
+                print(f"  ⚠️  Running on non-trading day ({date.today().strftime('%A')})")
+                print(f"  📅 Using next trading day: {expiration.strftime('%A, %m/%d/%Y')}")
+                print()
+
+            # Get available strikes from option chain (same as trading bot)
+            try:
+                option_chain = trading_bot.broker_client.get_option_chain(symbol_upper, expiration)
+                available_strikes = sorted(list(set([c.strike for c in option_chain])))
+
+                if available_strikes:
+                    # Find nearest available strikes (same logic as trading bot)
+                    short_strike = min(available_strikes, key=lambda x: abs(x - short_strike))
+                    
+                    if trend == TrendDirection.BULLISH:
+                        # For PUT spread, long strike should be below short
+                        valid_longs = [s for s in available_strikes if s < short_strike]
+                        if valid_longs:
+                            target_long = short_strike - spread_width
+                            long_strike = min(valid_longs, key=lambda x: abs(x - target_long))
+                    else:
+                        # For CALL spread, long strike should be above short
+                        valid_longs = [s for s in available_strikes if s > short_strike]
+                        if valid_longs:
+                            target_long = short_strike + spread_width
+                            long_strike = min(valid_longs, key=lambda x: abs(x - target_long))
+                            
+                    print(f"  ✅ Adjusted to available strikes: Short ${short_strike}, Long ${long_strike}")
+            except Exception as e:
+                print(f"  ⚠️  Could not get option chain, using calculated strikes: {str(e)}")
+
+            # Set EMA values for display
+            if trend == TrendDirection.BULLISH:
+                ema_20 = current_price * 1.001
+                ema_40 = current_price * 0.999
+            else:
+                ema_20 = current_price * 0.999
+                ema_40 = current_price * 1.001
+
+            # Format expiration display with note if adjusted
+            expiration_display = expiration.strftime("%m/%d/%Y") + " (0DTE)"
+            if expiration != date.today():
+                expiration_display += f" - Adjusted from {date.today().strftime('%m/%d/%Y')}"
 
             planned_orders.append(
                 {
@@ -2434,12 +2612,10 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                     "spread_type": "credit",
                     "short_strike": short_strike,
                     "long_strike": long_strike,
-                    "expiration": expiration.strftime("%m/%d/%Y") + " (0DTE)",
+                    "expiration": expiration_display,
                     "quantity": 1,
                     "option_type": spread_type_name,
-                    "estimated_price": (config.min_credit + config.max_credit) / 2
-                    if symbol_upper in SYMBOL_CONFIGS
-                    else 1.50,
+                    "estimated_price": (config.min_credit + config.max_credit) / 2,
                     # METF-specific fields for justification
                     "metf_signal": {
                         "trend": trend.value,
@@ -2449,6 +2625,8 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                         "spread_type": f"{spread_type_name} Credit Spread",
                         "market_open": is_market_open,
                     },
+                    # Store trend for execution
+                    "metf_trend": trend,
                 }
             )
             
@@ -2824,10 +3002,20 @@ def main():
     try:
         suppress_output()
         display_banner()
+        
+        # First, select trading mode (paper or live)
+        trading_mode = select_trading_mode()
+        set_trading_mode_env(trading_mode)
+        print()
 
         print("  ⏳ Connecting to broker...")
         config, broker_client = initialize_broker()
-        print("  ✅ Connected!")
+        
+        # Show trading mode indicator
+        if trading_mode == "live":
+            print("  🔴 Connected to LIVE trading account!")
+        else:
+            print("  ✅ Connected to paper trading account")
         print()
 
         if not config.symbols:
