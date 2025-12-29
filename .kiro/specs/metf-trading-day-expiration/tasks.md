@@ -30,7 +30,7 @@
     - _Requirements: 3.1, 3.2, 4.2, 4.3_
 
 - [x] 4. Write unit tests for TradingCalendar
-  - [ ]* 4.1 Create test file `tests/test_trading_calendar.py`
+  - [x] 4.1 Create test file `tests/test_trading_calendar.py`
     - Test `is_trading_day()` returns False for weekends
     - Test `is_trading_day()` returns True for weekdays (mocked API)
     - Test `is_trading_day()` returns False for holidays (mocked API response)

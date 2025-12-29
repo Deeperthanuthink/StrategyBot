@@ -201,6 +201,39 @@ class StrategyCalculator:
         nearest_below = max(strikes_below)
         return nearest_below
 
+    def find_nearest_strike_above(
+        self, target_strike: float, available_strikes: List[float]
+    ) -> float:
+        """Find the nearest available strike at or above the target strike.
+
+        For covered calls, we want strikes above the current price.
+        This method finds the lowest available strike that is at or above the target.
+
+        Args:
+            target_strike: Target strike price
+            available_strikes: List of available strike prices (sorted)
+
+        Returns:
+            Nearest available strike at or above target
+
+        Raises:
+            ValueError: If no strikes are available above target or inputs are invalid
+        """
+        if not available_strikes:
+            raise ValueError("No available strikes provided")
+        if target_strike <= 0:
+            raise ValueError("Target strike must be positive")
+
+        # Filter strikes that are at or above target
+        strikes_above = [strike for strike in available_strikes if strike >= target_strike]
+
+        if not strikes_above:
+            raise ValueError(f"No available strikes at or above target strike ${target_strike:.2f}")
+
+        # Return the lowest strike that's still above target (closest to target)
+        nearest_above = min(strikes_above)
+        return nearest_above
+
     def validate_spread_parameters(self, spread: SpreadParameters) -> bool:
         """Validate spread parameters.
 

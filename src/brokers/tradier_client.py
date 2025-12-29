@@ -412,6 +412,129 @@ class TradierClient(BaseBrokerClient):
                 )
             raise ValueError(error_msg) from e
 
+    def get_nearest_expiration(self, symbol: str, target_date: date) -> date:
+        """Get the nearest available option expiration to a target date.
+        
+        Args:
+            symbol: Stock symbol
+            target_date: Target expiration date
+            
+        Returns:
+            Nearest available expiration date (on or after target_date)
+            
+        Raises:
+            ValueError: If no expirations available
+        """
+        try:
+            available_expirations = self.get_option_expirations(symbol)
+            
+            if not available_expirations:
+                raise ValueError(f"No option expirations available for {symbol}")
+            
+            # Find the nearest expiration on or after the target date
+            future_expirations = [exp for exp in available_expirations if exp >= target_date]
+            
+            if future_expirations:
+                nearest = future_expirations[0]  # Already sorted
+            else:
+                # If no future expirations, use the last available one
+                nearest = available_expirations[-1]
+            
+            if self.logger and nearest != target_date:
+                self.logger.log_info(
+                    f"Adjusted expiration for {symbol}",
+                    {
+                        "symbol": symbol,
+                        "target_date": target_date.isoformat(),
+                        "nearest_date": nearest.isoformat(),
+                        "days_diff": (nearest - target_date).days
+                    }
+                )
+            
+            return nearest
+            
+        except Exception as e:
+            error_msg = f"Error finding nearest expiration for {symbol}: {str(e)}"
+            if self.logger:
+                self.logger.log_error(error_msg, e, {"symbol": symbol, "target_date": target_date.isoformat()})
+            raise ValueError(error_msg) from e
+
+    def get_option_quotes(self, option_symbols: List[str]) -> dict:
+        """Get real-time quotes for option symbols from Tradier API.
+        
+        Args:
+            option_symbols: List of option symbols in OCC format (e.g., 'AAPL260117P00262500')
+            
+        Returns:
+            Dictionary mapping option symbols to their quotes with bid, ask, last prices
+            
+        Raises:
+            ValueError: If API request fails
+        """
+        try:
+            import requests
+            
+            base_url = "https://sandbox.tradier.com" if self.is_sandbox else "https://api.tradier.com"
+            
+            # Tradier quotes endpoint accepts comma-separated symbols
+            symbols_param = ",".join(option_symbols)
+            
+            response = requests.get(
+                f"{base_url}/v1/markets/quotes",
+                params={"symbols": symbols_param, "greeks": "false"},
+                headers={
+                    "Authorization": f"Bearer {self.api_token}",
+                    "Accept": "application/json"
+                },
+                timeout=10
+            )
+            
+            if response.status_code != 200:
+                error_msg = f"Tradier API error: {response.status_code} - {response.text}"
+                if self.logger:
+                    self.logger.log_error(
+                        "Failed to get option quotes",
+                        None,
+                        {
+                            "symbols": option_symbols,
+                            "status_code": response.status_code,
+                            "response": response.text[:200]
+                        }
+                    )
+                raise ValueError(error_msg)
+            
+            data = response.json()
+            quotes_data = data.get("quotes", {})
+            
+            if not quotes_data:
+                return {}
+            
+            quote_list = quotes_data.get("quote", [])
+            
+            # Handle single quote (not a list)
+            if isinstance(quote_list, dict):
+                quote_list = [quote_list]
+            
+            # Build result dictionary
+            result = {}
+            for quote in quote_list:
+                symbol = quote.get("symbol", "")
+                result[symbol] = {
+                    "bid": float(quote.get("bid", 0) or 0),
+                    "ask": float(quote.get("ask", 0) or 0),
+                    "last": float(quote.get("last", 0) or 0),
+                    "mid": (float(quote.get("bid", 0) or 0) + float(quote.get("ask", 0) or 0)) / 2 if quote.get("bid") and quote.get("ask") else float(quote.get("last", 0) or 0)
+                }
+            
+            return result
+            
+        except Exception as e:
+            error_msg = f"Error getting option quotes: {str(e)}"
+            if self.logger:
+                self.logger.log_error(error_msg, e, {"symbols": option_symbols})
+            # Return empty dict instead of raising - allows graceful degradation
+            return {}
+
     def get_available_strikes(self, symbol: str, expiration: date, option_type: str = None) -> List[float]:
         """Get available strike prices for a symbol and expiration from Tradier API.
         
@@ -746,13 +869,47 @@ class TradierClient(BaseBrokerClient):
             short_symbol = f"{spread.symbol}{expiration_str}P{short_strike_str}"
             long_symbol = f"{spread.symbol}{expiration_str}P{long_strike_str}"
 
+            # Get real-time quotes to calculate accurate credit
+            quotes = self.get_option_quotes([short_symbol, long_symbol])
+            
+            # Calculate credit from actual market prices
+            if quotes and short_symbol in quotes and long_symbol in quotes:
+                short_price = quotes[short_symbol]["mid"]
+                long_price = quotes[long_symbol]["mid"]
+                estimated_credit = round(short_price - long_price, 2)
+                
+                if self.logger:
+                    self.logger.log_info(
+                        f"Calculated spread credit from market prices",
+                        {
+                            "symbol": spread.symbol,
+                            "short_price": short_price,
+                            "long_price": long_price,
+                            "credit": estimated_credit
+                        }
+                    )
+            else:
+                # Fallback: use 30% of spread width if quotes unavailable
+                spread_width = spread.short_strike - spread.long_strike
+                estimated_credit = round(spread_width * 0.30, 2)
+                
+                if self.logger:
+                    self.logger.log_warning(
+                        f"Using fallback credit calculation (quotes unavailable)",
+                        {
+                            "symbol": spread.symbol,
+                            "spread_width": spread_width,
+                            "fallback_credit": estimated_credit
+                        }
+                    )
+            
+            # Ensure minimum credit of $0.05
+            if estimated_credit < 0.05:
+                estimated_credit = 0.05
+
             # Use Tradier's native API for multileg orders
             # Lumibot doesn't fully support option spreads, so we use direct API
             import requests
-
-            # Calculate a reasonable credit price (typically 20-40% of spread width)
-            spread_width = spread.short_strike - spread.long_strike
-            estimated_credit = round(spread_width * 0.30, 2)  # 30% of spread width
 
             # Prepare multileg order data
             order_data = {

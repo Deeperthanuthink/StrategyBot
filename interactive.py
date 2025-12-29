@@ -69,6 +69,89 @@ def clear_screen():
     os.system("cls" if os.name == "nt" else "clear")
 
 
+def calculate_ema_from_bars(symbol: str, api_token: str, is_sandbox: bool, period: int = 20, lookback_minutes: int = 100) -> float:
+    """Calculate EMA from 1-minute bars using Tradier timesales API.
+    
+    Args:
+        symbol: Stock symbol
+        api_token: Tradier API token
+        is_sandbox: Whether using sandbox API
+        period: EMA period (default 20)
+        lookback_minutes: How many minutes of data to fetch (default 100)
+        
+    Returns:
+        Current EMA value, or None if calculation fails
+    """
+    import requests
+    from datetime import datetime, timedelta
+    
+    try:
+        base_url = "https://sandbox.tradier.com" if is_sandbox else "https://api.tradier.com"
+        
+        # Get timesales data (1-minute intervals)
+        # Tradier timesales endpoint: /v1/markets/timesales
+        end_time = datetime.now()
+        start_time = end_time - timedelta(minutes=lookback_minutes)
+        
+        response = requests.get(
+            f"{base_url}/v1/markets/timesales",
+            params={
+                "symbol": symbol,
+                "interval": "1min",
+                "start": start_time.strftime("%Y-%m-%d %H:%M"),
+                "end": end_time.strftime("%Y-%m-%d %H:%M"),
+            },
+            headers={
+                "Authorization": f"Bearer {api_token}",
+                "Accept": "application/json"
+            },
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            print(f"  ⚠️  Failed to fetch bar data: {response.status_code}")
+            return None
+            
+        data = response.json()
+        series = data.get("series", {})
+        
+        if not series:
+            print(f"  ⚠️  No timesales data available")
+            return None
+            
+        bars = series.get("data", [])
+        
+        if not bars or len(bars) < period:
+            print(f"  ⚠️  Insufficient bar data (need {period}, got {len(bars)})")
+            return None
+        
+        # Extract closing prices
+        prices = [float(bar.get("close", bar.get("price", 0))) for bar in bars]
+        prices = [p for p in prices if p > 0]  # Filter out invalid prices
+        
+        if len(prices) < period:
+            print(f"  ⚠️  Insufficient valid prices (need {period}, got {len(prices)})")
+            return None
+        
+        # Calculate EMA
+        # EMA = Price(t) * k + EMA(y) * (1 - k)
+        # where k = 2 / (N + 1)
+        k = 2 / (period + 1)
+        
+        # Start with SMA for first EMA value
+        ema = sum(prices[:period]) / period
+        
+        # Calculate EMA for remaining prices
+        for price in prices[period:]:
+            ema = price * k + ema * (1 - k)
+        
+        return ema
+        
+    except Exception as e:
+        print(f"  ⚠️  Error calculating EMA: {str(e)}")
+        return None
+
+
 def display_banner():
     """Display the interactive bot banner."""
     print()
@@ -1999,19 +2082,51 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
         
         if strategy == "pcs":
             # Put Credit Spread
-            short_strike = trading_bot.strategy_calculator.calculate_short_strike(
+            short_strike_target = trading_bot.strategy_calculator.calculate_short_strike(
                 current_price=current_price,
                 offset_percent=trading_bot.config.strike_offset_percent,
                 offset_dollars=trading_bot.config.strike_offset_dollars,
             )
-            long_strike = trading_bot.strategy_calculator.calculate_long_strike(
-                short_strike=short_strike,
+            long_strike_target = trading_bot.strategy_calculator.calculate_long_strike(
+                short_strike=short_strike_target,
                 spread_width=trading_bot.config.spread_width
             )
-            expiration = trading_bot.strategy_calculator.calculate_expiration_date(
+            target_expiration = trading_bot.strategy_calculator.calculate_expiration_date(
                 execution_date=date.today(),
                 offset_weeks=trading_bot.config.expiration_offset_weeks,
             )
+            
+            # Find nearest available expiration
+            expiration = trading_bot.broker_client.get_nearest_expiration(symbol, target_expiration)
+            
+            # Get option chain and find actual available strikes
+            option_chain = trading_bot.broker_client.get_option_chain(symbol, expiration)
+            put_options = [contract for contract in option_chain if contract.option_type == "put"]
+            available_strikes = sorted(set([contract.strike for contract in put_options]))
+            
+            # Find nearest available strikes
+            short_strike = trading_bot.strategy_calculator.find_nearest_strike_below(
+                target_strike=short_strike_target,
+                available_strikes=available_strikes
+            )
+            long_strike = trading_bot.strategy_calculator.find_nearest_strike_below(
+                target_strike=long_strike_target,
+                available_strikes=available_strikes
+            )
+            
+            # Get the actual option contracts for pricing
+            short_put = next((opt for opt in put_options if opt.strike == short_strike), None)
+            long_put = next((opt for opt in put_options if opt.strike == long_strike), None)
+            
+            # Get real-time quotes for accurate pricing
+            estimated_credit = 0.50  # Default fallback
+            if short_put and long_put:
+                quotes = trading_bot.broker_client.get_option_quotes([short_put.symbol, long_put.symbol])
+                if quotes:
+                    short_price = quotes.get(short_put.symbol, {}).get("mid", 0)
+                    long_price = quotes.get(long_put.symbol, {}).get("mid", 0)
+                    if short_price > 0 and long_price > 0:
+                        estimated_credit = short_price - long_price
             
             planned_orders.append({
                 'type': 'spread',
@@ -2022,16 +2137,30 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': trading_bot.config.contract_quantity,
                 'option_type': 'PUT',
-                'estimated_price': 0.50  # Placeholder - would need option chain data
+                'estimated_price': estimated_credit
             })
             
         elif strategy == "cc":
             # Covered Call
-            call_strike = current_price * (1 + trading_bot.config.covered_call_offset_percent / 100)
+            call_strike_target = current_price * (1 + trading_bot.config.covered_call_offset_percent / 100)
             if trading_bot.config.covered_call_offset_dollars:
-                call_strike = current_price + trading_bot.config.covered_call_offset_dollars
-            call_strike = round(call_strike)
-            expiration = date.today() + timedelta(days=trading_bot.config.covered_call_expiration_days)
+                call_strike_target = current_price + trading_bot.config.covered_call_offset_dollars
+            
+            target_expiration = date.today() + timedelta(days=trading_bot.config.covered_call_expiration_days)
+            
+            # Find nearest available expiration
+            expiration = trading_bot.broker_client.get_nearest_expiration(symbol, target_expiration)
+            
+            # Get option chain and find actual available strikes
+            option_chain = trading_bot.broker_client.get_option_chain(symbol, expiration)
+            call_options = [contract for contract in option_chain if contract.option_type == "call"]
+            available_strikes = sorted(set([contract.strike for contract in call_options]))
+            
+            # Find nearest available strike above target
+            call_strike = trading_bot.strategy_calculator.find_nearest_strike_above(
+                target_strike=call_strike_target,
+                available_strikes=available_strikes
+            )
             
             planned_orders.append({
                 'type': 'option',
@@ -2045,11 +2174,30 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
             
         elif strategy in ["pc", "cs"]:
             # Protected Collar / Collar Strategy
-            put_strike = current_price * (1 - trading_bot.config.collar_put_offset_percent / 100)
-            call_strike = current_price * (1 + trading_bot.config.collar_call_offset_percent / 100)
-            put_strike = round(put_strike)
-            call_strike = round(call_strike)
-            expiration = date.today() + timedelta(weeks=trading_bot.config.expiration_offset_weeks)
+            put_strike_target = current_price * (1 - trading_bot.config.collar_put_offset_percent / 100)
+            call_strike_target = current_price * (1 + trading_bot.config.collar_call_offset_percent / 100)
+            
+            target_expiration = date.today() + timedelta(weeks=trading_bot.config.expiration_offset_weeks)
+            
+            # Find nearest available expiration
+            expiration = trading_bot.broker_client.get_nearest_expiration(symbol, target_expiration)
+            
+            # Get option chain and find actual available strikes
+            option_chain = trading_bot.broker_client.get_option_chain(symbol, expiration)
+            put_options = [contract for contract in option_chain if contract.option_type == "put"]
+            call_options = [contract for contract in option_chain if contract.option_type == "call"]
+            put_strikes = sorted(set([contract.strike for contract in put_options]))
+            call_strikes = sorted(set([contract.strike for contract in call_options]))
+            
+            # Find nearest available strikes
+            put_strike = trading_bot.strategy_calculator.find_nearest_strike_below(
+                target_strike=put_strike_target,
+                available_strikes=put_strikes
+            )
+            call_strike = trading_bot.strategy_calculator.find_nearest_strike_above(
+                target_strike=call_strike_target,
+                available_strikes=call_strikes
+            )
             
             planned_orders.append({
                 'type': 'option',
@@ -2469,7 +2617,16 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
             spread_width = config.default_spread_width
             otm_offset = config.otm_offset
 
-            # Check if market is open
+            # Check if today is a trading day using TradingCalendar
+            # Create calendar using credentials from trading_bot.config
+            calendar = TradingCalendar(
+                api_token=trading_bot.config.tradier_credentials.api_token,
+                is_sandbox="sandbox" in trading_bot.config.tradier_credentials.base_url.lower()
+            )
+            
+            is_trading_day = calendar.is_trading_day(date.today())
+            
+            # Check if market is currently open (during trading hours)
             is_market_open = False
             try:
                 is_market_open = trading_bot.broker_client.is_market_open()
@@ -2478,12 +2635,12 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
 
             # METF requires real-time EMA data from 1-minute charts
             # Since we don't have historical bar data API, we need user input for direction
-            if not is_market_open:
+            if not is_trading_day:
                 print()
                 print(
                     "  ⚠️  METF Strategy requires real-time EMA data from 1-minute charts."
                 )
-                print("  📊 Market is currently CLOSED - EMA signals unavailable.")
+                print("  📊 Today is NOT a trading day - EMA signals unavailable.")
                 print()
                 print("  Please select the spread direction manually:")
                 print("    [P] PUT Credit Spread  - Use if you expect price to stay UP")
@@ -2497,51 +2654,93 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                     if direction in ["P", "PUT"]:
                         trend = TrendDirection.BULLISH
                         spread_type_name = "PUT"
-                        signal_reason = "Manual selection: PUT Credit Spread (market closed)"
+                        signal_reason = "Manual selection: PUT Credit Spread (non-trading day)"
+                        # Set dummy EMA values for display
+                        ema_20 = current_price * 1.001
+                        ema_40 = current_price * 0.999
                         break
                     elif direction in ["C", "CALL"]:
                         trend = TrendDirection.BEARISH
                         spread_type_name = "CALL"
-                        signal_reason = "Manual selection: CALL Credit Spread (market closed)"
+                        signal_reason = "Manual selection: CALL Credit Spread (non-trading day)"
+                        # Set dummy EMA values for display
+                        ema_20 = current_price * 0.999
+                        ema_40 = current_price * 1.001
                         break
                     else:
                         print("  ❌ Please enter 'P' for PUT or 'C' for CALL")
             else:
-                # Market is open - in production, fetch real 1-min bars and calculate EMAs
-                # For now, we still need user input since we don't have bar data API
+                # Today is a trading day - calculate EMAs automatically
                 print()
-                print("  📊 METF Strategy - EMA Signal Selection")
+                print("  📊 METF Strategy - Calculating EMA signals...")
                 print()
-                print(
-                    "  ℹ️  In production, this would use real-time 1-minute EMA crossover."
+                
+                # Calculate 20 EMA and 40 EMA from 1-minute bars
+                ema_20 = calculate_ema_from_bars(
+                    symbol_upper,
+                    trading_bot.config.tradier_credentials.api_token,
+                    "sandbox" in trading_bot.config.tradier_credentials.base_url.lower(),
+                    period=20,
+                    lookback_minutes=100
                 )
-                print(
-                    "  📈 Check your charting platform for 20 EMA vs 40 EMA on 1-min chart."
+                
+                ema_40 = calculate_ema_from_bars(
+                    symbol_upper,
+                    trading_bot.config.tradier_credentials.api_token,
+                    "sandbox" in trading_bot.config.tradier_credentials.base_url.lower(),
+                    period=40,
+                    lookback_minutes=150
                 )
-                print()
-                print("  Select based on your EMA analysis:")
-                print(
-                    "    [P] PUT Credit Spread  - 20 EMA > 40 EMA (BULLISH momentum)"
-                )
-                print(
-                    "    [C] CALL Credit Spread - 20 EMA < 40 EMA (BEARISH momentum)"
-                )
-                print()
+                
+                # Check if EMA calculation was successful
+                if ema_20 is None or ema_40 is None:
+                    print("  ⚠️  Unable to calculate EMAs automatically.")
+                    print("  📊 Falling back to manual selection...")
+                    print()
+                    print("  Please select the spread direction manually:")
+                    print("    [P] PUT Credit Spread  - Use if you expect price to stay UP")
+                    print("    [C] CALL Credit Spread - Use if you expect price to stay DOWN")
+                    print()
 
-                while True:
-                    direction = input("  Enter direction (P/C): ").strip().upper()
-                    if direction in ["P", "PUT"]:
+                    while True:
+                        direction = input("  Enter direction (P/C): ").strip().upper()
+                        if direction in ["P", "PUT"]:
+                            trend = TrendDirection.BULLISH
+                            spread_type_name = "PUT"
+                            signal_reason = "Manual selection: PUT Credit Spread (EMA calculation failed)"
+                            # Set dummy EMA values for display
+                            ema_20 = current_price * 1.001
+                            ema_40 = current_price * 0.999
+                            break
+                        elif direction in ["C", "CALL"]:
+                            trend = TrendDirection.BEARISH
+                            spread_type_name = "CALL"
+                            signal_reason = "Manual selection: CALL Credit Spread (EMA calculation failed)"
+                            # Set dummy EMA values for display
+                            ema_20 = current_price * 0.999
+                            ema_40 = current_price * 1.001
+                            break
+                        else:
+                            print("  ❌ Please enter 'P' for PUT or 'C' for CALL")
+                else:
+                    # EMAs calculated successfully - determine trend automatically
+                    print(f"  ✅ 20 EMA: ${ema_20:.2f}")
+                    print(f"  ✅ 40 EMA: ${ema_40:.2f}")
+                    print()
+                    
+                    if ema_20 > ema_40:
                         trend = TrendDirection.BULLISH
                         spread_type_name = "PUT"
-                        signal_reason = "User confirmed: 20 EMA > 40 EMA → BULLISH → PUT Credit Spread"
-                        break
-                    elif direction in ["C", "CALL"]:
+                        signal_reason = f"Automatic: 20 EMA (${ema_20:.2f}) > 40 EMA (${ema_40:.2f}) → BULLISH → PUT Credit Spread"
+                        print(f"  📈 BULLISH Signal: 20 EMA > 40 EMA")
+                        print(f"  ✅ Executing PUT Credit Spread")
+                    else:
                         trend = TrendDirection.BEARISH
                         spread_type_name = "CALL"
-                        signal_reason = "User confirmed: 20 EMA < 40 EMA → BEARISH → CALL Credit Spread"
-                        break
-                    else:
-                        print("  ❌ Please enter 'P' for PUT or 'C' for CALL")
+                        signal_reason = f"Automatic: 20 EMA (${ema_20:.2f}) < 40 EMA (${ema_40:.2f}) → BEARISH → CALL Credit Spread"
+                        print(f"  📉 BEARISH Signal: 20 EMA < 40 EMA")
+                        print(f"  ✅ Executing CALL Credit Spread")
+                    print()
 
             # Calculate initial strikes based on trend (same as trading bot)
             if trend == TrendDirection.BULLISH:
@@ -2551,12 +2750,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 short_strike = round(current_price + otm_offset)
                 long_strike = short_strike + spread_width
 
-            # Use TradingCalendar to get 0DTE expiration
-            # Create calendar using credentials from trading_bot.config
-            calendar = TradingCalendar(
-                api_token=trading_bot.config.tradier_credentials.api_token,
-                is_sandbox="sandbox" in trading_bot.config.tradier_credentials.base_url.lower()
-            )
+            # Use TradingCalendar to get 0DTE expiration (already created above)
             
             expiration = calendar.get_0dte_expiration()
             
@@ -2591,14 +2785,6 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                     print(f"  ✅ Adjusted to available strikes: Short ${short_strike}, Long ${long_strike}")
             except Exception as e:
                 print(f"  ⚠️  Could not get option chain, using calculated strikes: {str(e)}")
-
-            # Set EMA values for display
-            if trend == TrendDirection.BULLISH:
-                ema_20 = current_price * 1.001
-                ema_40 = current_price * 0.999
-            else:
-                ema_20 = current_price * 0.999
-                ema_40 = current_price * 1.001
 
             # Format expiration display with note if adjusted
             expiration_display = expiration.strftime("%m/%d/%Y") + " (0DTE)"

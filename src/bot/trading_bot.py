@@ -682,10 +682,13 @@ class TradingBot:
             )
 
             # Calculate expiration date
-            expiration = self.strategy_calculator.calculate_expiration_date(
+            target_expiration = self.strategy_calculator.calculate_expiration_date(
                 execution_date=date.today(),
                 offset_weeks=self.config.expiration_offset_weeks,
             )
+            
+            # Find nearest available expiration
+            expiration = self.broker_client.get_nearest_expiration(symbol, target_expiration)
 
             self.logger.log_info(
                 f"Calculated strikes for {symbol}",
@@ -707,10 +710,13 @@ class TradingBot:
 
             try:
                 option_chain = self.broker_client.get_option_chain(symbol, expiration)
-                available_strikes = sorted([contract.strike for contract in option_chain])
+                
+                # For put credit spreads, filter for put options only
+                put_options = [contract for contract in option_chain if contract.option_type == "put"]
+                available_strikes = sorted(set([contract.strike for contract in put_options]))
 
                 if not available_strikes:
-                    error_msg = "No option strikes available in option chain"
+                    error_msg = "No put option strikes available in option chain"
                     self.logger.log_warning(
                         f"Skipping {symbol} - {error_msg}",
                         {"symbol": symbol, "expiration": expiration.isoformat()},
@@ -729,7 +735,7 @@ class TradingBot:
                     )
 
                 self.logger.log_info(
-                    f"Retrieved {len(available_strikes)} available strikes for {symbol}",
+                    f"Retrieved {len(available_strikes)} available put strikes for {symbol}",
                     {
                         "symbol": symbol,
                         "strike_count": len(available_strikes),
@@ -987,10 +993,13 @@ class TradingBot:
             call_strike_target = self.collar_calculator.calculate_call_strike(current_price)
 
             # Calculate expiration
-            expiration = self.strategy_calculator.calculate_expiration_date(
+            target_expiration = self.strategy_calculator.calculate_expiration_date(
                 execution_date=date.today(),
                 offset_weeks=self.config.expiration_offset_weeks,
             )
+            
+            # Find nearest available expiration
+            expiration = self.broker_client.get_nearest_expiration(symbol, target_expiration)
 
             self.logger.log_info(
                 f"Calculated collar targets for {symbol}",
@@ -1005,19 +1014,29 @@ class TradingBot:
             # Get option chain
             self.logger.log_info(f"Retrieving option chain for {symbol}")
             option_chain = self.broker_client.get_option_chain(symbol, expiration)
-            available_strikes = sorted(list(set([contract.strike for contract in option_chain])))
+            
+            # Separate puts and calls
+            put_options = [contract for contract in option_chain if contract.option_type == "put"]
+            call_options = [contract for contract in option_chain if contract.option_type == "call"]
+            
+            put_strikes = sorted(set([contract.strike for contract in put_options]))
+            call_strikes = sorted(set([contract.strike for contract in call_options]))
 
             self.logger.log_info(
-                f"Retrieved {len(available_strikes)} available strikes for {symbol}",
-                {"symbol": symbol, "strike_count": len(available_strikes)},
+                f"Retrieved strikes for {symbol}",
+                {
+                    "symbol": symbol,
+                    "put_strikes": len(put_strikes),
+                    "call_strikes": len(call_strikes)
+                },
             )
 
             # Find actual strikes
             put_strike = self.collar_calculator.find_nearest_strike_below(
-                put_strike_target, available_strikes
+                put_strike_target, put_strikes
             )
             call_strike = self.collar_calculator.find_nearest_strike_above(
-                call_strike_target, available_strikes
+                call_strike_target, call_strikes
             )
 
             self.logger.log_info(
@@ -1140,7 +1159,10 @@ class TradingBot:
             call_strike_target = self.covered_call_calculator.calculate_call_strike(current_price)
 
             # Calculate expiration (~10 days out)
-            expiration = self.covered_call_calculator.calculate_expiration()
+            target_expiration = self.covered_call_calculator.calculate_expiration()
+            
+            # Find nearest available expiration
+            expiration = self.broker_client.get_nearest_expiration(symbol, target_expiration)
 
             self.logger.log_info(
                 f"Calculated covered call targets for {symbol}",
@@ -1156,7 +1178,10 @@ class TradingBot:
             # Get option chain
             self.logger.log_info(f"Retrieving option chain for {symbol}")
             option_chain = self.broker_client.get_option_chain(symbol, expiration)
-            available_strikes = sorted(list(set([contract.strike for contract in option_chain])))
+            
+            # Filter for call options only
+            call_options = [contract for contract in option_chain if contract.option_type == "call"]
+            available_strikes = sorted(set([contract.strike for contract in call_options]))
 
             # Find actual strike
             call_strike = self.covered_call_calculator.find_nearest_strike_above(
@@ -1268,7 +1293,10 @@ class TradingBot:
             )
 
             # Calculate expiration
-            expiration = self.wheel_calculator.calculate_expiration()
+            target_expiration = self.wheel_calculator.calculate_expiration()
+            
+            # Find nearest available expiration
+            expiration = self.broker_client.get_nearest_expiration(symbol, target_expiration)
 
             # Get option chain
             option_chain = self.broker_client.get_option_chain(symbol, expiration)
@@ -1658,7 +1686,10 @@ class TradingBot:
             )
 
             # Calculate expiration
-            expiration = self.butterfly_calculator.calculate_expiration()
+            target_expiration = self.butterfly_calculator.calculate_expiration()
+            
+            # Find nearest available expiration
+            expiration = self.broker_client.get_nearest_expiration(symbol, target_expiration)
 
             # Get option chain
             option_chain = self.broker_client.get_option_chain(symbol, expiration)
@@ -1753,7 +1784,10 @@ class TradingBot:
             put_strike_target = self.married_put_calculator.calculate_put_strike(current_price)
 
             # Calculate expiration
-            expiration = self.married_put_calculator.calculate_expiration()
+            target_expiration = self.married_put_calculator.calculate_expiration()
+            
+            # Find nearest available expiration
+            expiration = self.broker_client.get_nearest_expiration(symbol, target_expiration)
 
             # Get shares to buy
             shares_to_buy = self.config.mp_shares_per_unit
@@ -1883,7 +1917,10 @@ class TradingBot:
             )
 
             # Calculate expiration
-            expiration = self.long_straddle_calculator.calculate_expiration()
+            target_expiration = self.long_straddle_calculator.calculate_expiration()
+            
+            # Find nearest available expiration
+            expiration = self.broker_client.get_nearest_expiration(symbol, target_expiration)
 
             # Get number of contracts
             num_contracts = self.config.ls_num_contracts
@@ -2018,7 +2055,10 @@ class TradingBot:
             )
 
             # Calculate expiration
-            expiration = self.iron_butterfly_calculator.calculate_expiration()
+            target_expiration = self.iron_butterfly_calculator.calculate_expiration()
+            
+            # Find nearest available expiration
+            expiration = self.broker_client.get_nearest_expiration(symbol, target_expiration)
 
             # Get number of contracts
             num_contracts = self.config.ib_num_contracts
@@ -2158,7 +2198,10 @@ class TradingBot:
             )
 
             # Calculate expiration
-            expiration = self.short_strangle_calculator.calculate_expiration()
+            target_expiration = self.short_strangle_calculator.calculate_expiration()
+            
+            # Find nearest available expiration
+            expiration = self.broker_client.get_nearest_expiration(symbol, target_expiration)
 
             # Get number of contracts
             num_contracts = self.config.ss_num_contracts
@@ -2300,7 +2343,10 @@ class TradingBot:
             )
 
             # Calculate expiration
-            expiration = self.iron_condor_calculator.calculate_expiration()
+            target_expiration = self.iron_condor_calculator.calculate_expiration()
+            
+            # Find nearest available expiration
+            expiration = self.broker_client.get_nearest_expiration(symbol, target_expiration)
 
             # Get number of contracts
             num_contracts = self.config.ic_num_contracts
