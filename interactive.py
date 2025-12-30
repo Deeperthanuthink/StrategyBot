@@ -328,8 +328,14 @@ def select_stock(suggested_symbols):
             sys.exit(0)
 
 
-def select_strategy(symbol, shares_owned):
-    """Let user select a trading strategy by typing abbreviation."""
+def select_strategy(symbol, shares_owned, broker_client=None):
+    """Let user select a trading strategy by typing abbreviation.
+    
+    Args:
+        symbol: Stock symbol
+        shares_owned: Number of shares owned (including long call equivalents)
+        broker_client: Optional broker client to get detailed position info
+    """
     print()
     print("─" * 70)
     print("📊 TRADING STRATEGIES")
@@ -365,8 +371,31 @@ def select_strategy(symbol, shares_owned):
     print(f"  │ tcc │ Tiered CC {status_tcc}      │ 3-tier multi-expiration calls│")
     print("  └─────┴──────────────────┴──────────────────────────┘")
     
-    if shares_owned > 0:
-        print(f"  💼 You own {shares_owned} shares of {symbol}")
+    if shares_owned > 0 or broker_client:
+        position_info = []
+        if shares_owned > 0:
+            position_info.append(f"{shares_owned} shares")
+        
+        # Get long calls and puts if broker_client is available
+        if broker_client:
+            try:
+                detailed_positions = broker_client.get_detailed_positions(symbol)
+                long_calls = [pos for pos in detailed_positions 
+                            if hasattr(pos, 'position_type') and pos.position_type == 'long_call' and pos.quantity > 0]
+                long_puts = [pos for pos in detailed_positions 
+                            if hasattr(pos, 'position_type') and pos.position_type == 'long_put' and pos.quantity > 0]
+                
+                if long_calls:
+                    total_long_calls = sum(abs(pos.quantity) for pos in long_calls)
+                    position_info.append(f"{total_long_calls} long call(s)")
+                if long_puts:
+                    total_long_puts = sum(abs(pos.quantity) for pos in long_puts)
+                    position_info.append(f"{total_long_puts} long put(s)")
+            except Exception:
+                pass  # Silently fail if we can't get detailed positions
+        
+        if position_info:
+            print(f"  💼 You own {', '.join(position_info)} of {symbol}")
     
     print()
     print("🔹 VOLATILITY STRATEGIES")
@@ -2329,20 +2358,18 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                             
                             # Find strike near the money (slightly below current price)
                             # Use configurable percentage below current price for better premium
-                            target_percent_below = config.tpd_target_percent_below / 100.0
+                            target_percent_below = trading_bot.config.tpd_target_percent_below / 100.0
                             target_strike = current_price * (1 - target_percent_below)
+                            
+                            # Select the nearest available strike to our target
                             short_strike = min(available_strikes, key=lambda x: abs(x - target_strike))
                             
-                            # Make sure short strike is below long put strike (for proper diagonal)
-                            if short_strike >= long_put_strike:
-                                # If short would be above long, use a strike below long put
-                                strikes_below_long = [s for s in available_strikes if s < long_put_strike]
-                                if strikes_below_long:
-                                    # Use the highest strike below the long put
-                                    short_strike = max(strikes_below_long)
-                                else:
-                                    print(f"  ⚠️  Skipping tier {tier_idx} - no valid strikes")
-                                    continue
+                            # Validate: short strike should be above long put strike for proper diagonal
+                            # (short put closer to money, long put provides protection below)
+                            if short_strike <= long_put_strike:
+                                print(f"  ⚠️  Skipping tier {tier_idx} - calculated strike ${short_strike} is at or below long put ${long_put_strike}")
+                                print(f"     Current price: ${current_price:.2f}, Target: ${target_strike:.2f}")
+                                continue
                             
                             # Get quote for pricing
                             short_put = next((opt for opt in put_options if opt.strike == short_strike), None)
@@ -2359,27 +2386,6 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                                 'strike': short_strike,
                                 'expiration': expiration.strftime('%m/%d/%Y'),
                                 'quantity': qty,
-                                'option_type': f'PUT Tier {tier_idx} (vs ${long_put_strike:.2f})',
-                                'estimated_price': estimated_credit
-                            })
-                        except Exception as tier_error:
-                            print(f"  ⚠️  Skipping tier {tier_idx}: {str(tier_error)}")
-                            continue
-                            # Get quote for pricing
-                            short_put = next((opt for opt in put_options if opt.strike == short_strike), None)
-                            
-                            estimated_credit = 0.50  # Default
-                            if short_put:
-                                quotes = trading_bot.broker_client.get_option_quotes([short_put.symbol])
-                                if quotes and short_put.symbol in quotes:
-                                    estimated_credit = quotes[short_put.symbol].get("mid", 0.50)
-                            
-                            planned_orders.append({
-                                'type': 'option',
-                                'action': 'SELL',
-                                'strike': short_strike,
-                                'expiration': expiration.strftime('%m/%d/%Y'),
-                                'quantity': 1,  # Always 1 contract per tier
                                 'option_type': f'PUT Tier {tier_idx} (vs ${long_put_strike:.2f})',
                                 'estimated_price': estimated_credit
                             })
@@ -3497,7 +3503,7 @@ def main():
         # Check shares owned for collar eligibility (includes long call equivalents)
         shares_owned = get_shares_owned(broker_client, selected_symbol, position_service)
 
-        selected_strategy = select_strategy(selected_symbol, shares_owned)
+        selected_strategy = select_strategy(selected_symbol, shares_owned, broker_client)
 
         # Handle tiered covered calls with special workflow
         if selected_strategy == "tcc":

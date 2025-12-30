@@ -111,7 +111,7 @@
     },
     "tpd": {
       "name": "Tiered Put Diagonal",
-      "target_percent_below": 5.0,
+      "target_percent_below": 2.0,
       "num_tiers": 3,
       "tier_spacing_weeks": 1
     }
