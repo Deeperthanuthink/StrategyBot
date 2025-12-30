@@ -343,6 +343,8 @@ def select_strategy(symbol, shares_owned):
     print("🔹 BASIC STRATEGIES")
     print("  ┌─────┬──────────────────┬──────────────────────────┐")
     print("  │ pcs │ Put Credit Spread│ Sell put spread for credit│")
+    print("  │ lps │ Laddered Put Spr │ 5 weekly put spreads      │")
+    print("  │ tpd │ Put Diagonal     │ Sell puts against long puts│")
     print("  │ ws  │ Wheel Strategy   │ Auto-cycle puts/calls     │")
     print("  │ mp  │ Married Put      │ Buy shares + protective put│")
     print("  └─────┴──────────────────┴──────────────────────────┘")
@@ -402,7 +404,7 @@ def select_strategy(symbol, shares_owned):
     while True:
         try:
             choice = (
-                input("  Enter strategy (pc/pcs/cs/cc/ws/lcc/tcc/dc/bf/bwb/mp/ls/ib/ss/ic/jl/bl/metf): ").strip().lower()
+                input("  Enter strategy (pc/pcs/lps/tpd/cs/cc/ws/lcc/tcc/dc/bf/bwb/mp/ls/ib/ss/ic/jl/bl/metf): ").strip().lower()
             )
 
             if choice == "pc":
@@ -414,6 +416,14 @@ def select_strategy(symbol, shares_owned):
             elif choice == "pcs":
                 print("  ✅ Selected: Put Credit Spread")
                 return "pcs"
+            elif choice == "lps":
+                print("  ✅ Selected: Laddered Put Spread")
+                print("     📝 5 weekly put credit spreads with staggered expirations")
+                return "lps"
+            elif choice == "tpd":
+                print("  ✅ Selected: Tiered Put Diagonal")
+                print("     📝 Sell puts at 3 expirations against your long puts")
+                return "tpd"
             elif choice == "cs":
                 if not has_100_shares:
                     print(f"  ❌ Collar requires 100+ shares. You have {shares_owned}.")
@@ -509,6 +519,8 @@ def confirm_execution(symbol, strategy, shares_owned):
     strategy_names = {
         "pc": "Protected Collar",
         "pcs": "Put Credit Spread",
+        "lps": "Laddered Put Spread",
+        "tpd": "Tiered Put Diagonal",
         "cs": "Collar Strategy",
         "cc": "Covered Call",
         "ws": f"Wheel Strategy ({'CC' if has_100_shares else 'CSP'} phase)",
@@ -540,6 +552,18 @@ def confirm_execution(symbol, strategy, shares_owned):
     if strategy == "cc":
         print(f"  Strike:     ~5% above current price")
         print(f"  Expiry:     ~10 days out")
+    if strategy == "lps":
+        print(f"  Structure:  5 weekly put credit spreads")
+        print(f"  Legs:       Week 1, 2, 3, 4, 5 expirations")
+        print(f"  Strikes:    Below current price (same for all weeks)")
+        print(f"  Spread:     $5 wide (configurable)")
+        print(f"  💡 Benefit: Consistent weekly income, no shares needed")
+    if strategy == "tpd":
+        print(f"  Structure:  Tiered put diagonals (3 expirations)")
+        print(f"  Requirement: Must own long puts on this symbol")
+        print(f"  Tiers:      1 week, 2 weeks, 3 weeks out")
+        print(f"  Distribution: Quantity split across tiers")
+        print(f"  💡 Benefit: Maximize premium from protective puts")
     if strategy == "ws":
         if has_100_shares:
             contracts = shares_owned // 100
@@ -2140,6 +2164,240 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'estimated_price': estimated_credit
             })
             
+        elif strategy == "lps":
+            # Laddered Put Spread - 5 weekly put credit spreads
+            # Calculate target strikes (use more conservative offset for safety)
+            # Use 5-10% below current price instead of the default 20%
+            conservative_offset = min(trading_bot.config.strike_offset_percent, 10.0)
+            
+            short_strike_target = trading_bot.strategy_calculator.calculate_short_strike(
+                current_price=current_price,
+                offset_percent=conservative_offset,
+                offset_dollars=0,  # Use percentage only
+            )
+            long_strike_target = trading_bot.strategy_calculator.calculate_long_strike(
+                short_strike=short_strike_target,
+                spread_width=trading_bot.config.spread_width
+            )
+            
+            # Create 5 weekly spreads
+            num_legs = 5  # 5 weekly expirations
+            for i in range(num_legs):
+                try:
+                    # Calculate expiration for each week
+                    target_expiration = date.today() + timedelta(weeks=i+1)
+                    
+                    # Find nearest available expiration
+                    expiration = trading_bot.broker_client.get_nearest_expiration(symbol, target_expiration)
+                    
+                    # Get option chain for this expiration
+                    option_chain = trading_bot.broker_client.get_option_chain(symbol, expiration)
+                    put_options = [contract for contract in option_chain if contract.option_type == "put"]
+                    available_strikes = sorted(set([contract.strike for contract in put_options]))
+                    
+                    if not available_strikes:
+                        continue  # Skip this week if no strikes available
+                    
+                    # Find nearest available strikes with fallback
+                    try:
+                        short_strike = trading_bot.strategy_calculator.find_nearest_strike_below(
+                            target_strike=short_strike_target,
+                            available_strikes=available_strikes
+                        )
+                    except ValueError:
+                        # If target is too low, use the lowest available strike
+                        short_strike = min(available_strikes)
+                    
+                    try:
+                        long_strike = trading_bot.strategy_calculator.find_nearest_strike_below(
+                            target_strike=long_strike_target,
+                            available_strikes=available_strikes
+                        )
+                    except ValueError:
+                        # If target is too low, use strike below short strike
+                        strikes_below_short = [s for s in available_strikes if s < short_strike]
+                        if strikes_below_short:
+                            long_strike = max(strikes_below_short)
+                        else:
+                            continue  # Skip if can't form a valid spread
+                    
+                    # Ensure valid spread (short > long)
+                    if short_strike <= long_strike:
+                        continue
+                    
+                    # Get quotes for pricing
+                    short_put = next((opt for opt in put_options if opt.strike == short_strike), None)
+                    long_put = next((opt for opt in put_options if opt.strike == long_strike), None)
+                    
+                    estimated_credit = 0.50  # Default fallback
+                    if short_put and long_put:
+                        quotes = trading_bot.broker_client.get_option_quotes([short_put.symbol, long_put.symbol])
+                        if quotes:
+                            short_price = quotes.get(short_put.symbol, {}).get("mid", 0)
+                            long_price = quotes.get(long_put.symbol, {}).get("mid", 0)
+                            if short_price > 0 and long_price > 0:
+                                estimated_credit = short_price - long_price
+                    
+                    planned_orders.append({
+                        'type': 'spread',
+                        'action': 'SELL',
+                        'spread_type': 'credit',
+                        'short_strike': short_strike,
+                        'long_strike': long_strike,
+                        'expiration': expiration.strftime('%m/%d/%Y'),
+                        'quantity': 1,  # 1 spread per week
+                        'option_type': f'PUT (Week {i+1})',
+                        'estimated_price': estimated_credit
+                    })
+                except Exception as e:
+                    # Skip this week if any error occurs
+                    print(f"  ⚠️  Skipping week {i+1}: {str(e)}")
+                    continue
+            
+        elif strategy == "tpd":
+            # Tiered Put Diagonal - Sell short-term puts at multiple expirations against existing long puts
+            # Similar to Tiered Covered Calls but for puts
+            try:
+                detailed_positions = trading_bot.broker_client.get_detailed_positions(symbol)
+                
+                # Filter for long puts (position_type will be 'long_put')
+                long_puts = [pos for pos in detailed_positions 
+                            if hasattr(pos, 'position_type') and pos.position_type == 'long_put' and pos.quantity > 0]
+                
+                if not long_puts:
+                    print(f"  ❌ No long puts found for {symbol}")
+                    print(f"     Tiered Put Diagonal requires existing long put positions")
+                    print(f"     Please buy protective puts first, then use this strategy")
+                    return None
+                
+                print(f"  ✅ Found {len(long_puts)} long put position(s)")
+                
+                # For each long put, create tiered short puts at 3 different expirations
+                for long_put in long_puts:
+                    long_put_strike = long_put.strike if hasattr(long_put, 'strike') else 0
+                    long_put_qty = abs(long_put.quantity)
+                    
+                    if long_put_strike == 0:
+                        continue
+                    
+                    # Create 3 tiers: 1 week, 2 weeks, 3 weeks out
+                    tier_expirations = [7, 14, 21]  # days out
+                    tier_quantities = []
+                    
+                    # Distribute quantity across tiers
+                    if long_put_qty == 3:
+                        # If exactly 3 contracts, sell 1 per tier
+                        tier_quantities = [1, 1, 1]
+                    elif long_put_qty > 3:
+                        # If more than 3, distribute evenly
+                        base_qty = long_put_qty // 3
+                        remainder = long_put_qty % 3
+                        tier_quantities = [base_qty, base_qty, base_qty]
+                        # Distribute remainder to first tiers
+                        for i in range(remainder):
+                            tier_quantities[i] += 1
+                    else:
+                        # If less than 3 contracts, distribute 1 per tier starting from Tier 1
+                        tier_quantities = [0, 0, 0]
+                        for i in range(long_put_qty):
+                            tier_quantities[i] = 1
+                    
+                    # Create orders for each tier
+                    for tier_idx, (days_out, qty) in enumerate(zip(tier_expirations, tier_quantities), 1):
+                        if qty == 0:
+                            continue
+                            
+                        # Target expiration for this tier
+                        target_expiration = date.today() + timedelta(days=days_out)
+                        
+                        try:
+                            # Find nearest available expiration
+                            expiration = trading_bot.broker_client.get_nearest_expiration(symbol, target_expiration)
+                            
+                            # Make sure short expiration is before long expiration
+                            if hasattr(long_put, 'expiration') and expiration >= long_put.expiration:
+                                print(f"  ⚠️  Skipping tier {tier_idx} - expiration too far out")
+                                continue
+                            
+                            # Get option chain
+                            option_chain = trading_bot.broker_client.get_option_chain(symbol, expiration)
+                            put_options = [contract for contract in option_chain if contract.option_type == "put"]
+                            available_strikes = sorted(set([contract.strike for contract in put_options]))
+                            
+                            if not available_strikes:
+                                continue
+                            
+                            # Find strike near the money (slightly below current price)
+                            # Use configurable percentage below current price for better premium
+                            target_percent_below = config.tpd_target_percent_below / 100.0
+                            target_strike = current_price * (1 - target_percent_below)
+                            short_strike = min(available_strikes, key=lambda x: abs(x - target_strike))
+                            
+                            # Make sure short strike is below long put strike (for proper diagonal)
+                            if short_strike >= long_put_strike:
+                                # If short would be above long, use a strike below long put
+                                strikes_below_long = [s for s in available_strikes if s < long_put_strike]
+                                if strikes_below_long:
+                                    # Use the highest strike below the long put
+                                    short_strike = max(strikes_below_long)
+                                else:
+                                    print(f"  ⚠️  Skipping tier {tier_idx} - no valid strikes")
+                                    continue
+                            
+                            # Get quote for pricing
+                            short_put = next((opt for opt in put_options if opt.strike == short_strike), None)
+                            
+                            estimated_credit = 0.50  # Default
+                            if short_put:
+                                quotes = trading_bot.broker_client.get_option_quotes([short_put.symbol])
+                                if quotes and short_put.symbol in quotes:
+                                    estimated_credit = quotes[short_put.symbol].get("mid", 0.50)
+                            
+                            planned_orders.append({
+                                'type': 'option',
+                                'action': 'SELL',
+                                'strike': short_strike,
+                                'expiration': expiration.strftime('%m/%d/%Y'),
+                                'quantity': qty,
+                                'option_type': f'PUT Tier {tier_idx} (vs ${long_put_strike:.2f})',
+                                'estimated_price': estimated_credit
+                            })
+                        except Exception as tier_error:
+                            print(f"  ⚠️  Skipping tier {tier_idx}: {str(tier_error)}")
+                            continue
+                            # Get quote for pricing
+                            short_put = next((opt for opt in put_options if opt.strike == short_strike), None)
+                            
+                            estimated_credit = 0.50  # Default
+                            if short_put:
+                                quotes = trading_bot.broker_client.get_option_quotes([short_put.symbol])
+                                if quotes and short_put.symbol in quotes:
+                                    estimated_credit = quotes[short_put.symbol].get("mid", 0.50)
+                            
+                            planned_orders.append({
+                                'type': 'option',
+                                'action': 'SELL',
+                                'strike': short_strike,
+                                'expiration': expiration.strftime('%m/%d/%Y'),
+                                'quantity': 1,  # Always 1 contract per tier
+                                'option_type': f'PUT Tier {tier_idx} (vs ${long_put_strike:.2f})',
+                                'estimated_price': estimated_credit
+                            })
+                        except Exception as tier_error:
+                            print(f"  ⚠️  Skipping tier {tier_idx}: {str(tier_error)}")
+                            continue
+                    
+                if not planned_orders:
+                    print(f"  ❌ Could not create any diagonal spreads")
+                    print(f"     No valid short expirations found")
+                    return None
+                    
+            except Exception as e:
+                print(f"  ❌ Error checking positions: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                return None
+            
         elif strategy == "cc":
             # Covered Call
             call_strike_target = current_price * (1 + trading_bot.config.covered_call_offset_percent / 100)
@@ -2871,6 +3129,8 @@ def verify_planned_orders(symbol, strategy, planned_orders):
     strategy_names = {
         "pc": "Protected Collar",
         "pcs": "Put Credit Spread",
+        "lps": "Laddered Put Spread",
+        "tpd": "Tiered Put Diagonal",
         "cs": "Collar Strategy",
         "cc": "Covered Call",
         "ws": "Wheel Strategy",
@@ -2976,6 +3236,14 @@ def verify_planned_orders(symbol, strategy, planned_orders):
     
     for i, order in enumerate(planned_orders, 1):
         order_type = order.get('type', 'Unknown')
+        
+        # Handle error orders
+        if order_type == 'error':
+            print(f"  │ ❌ {order.get('message', 'Unknown error')}" + " " * max(0, 66 - len(f" ❌ {order.get('message', 'Unknown error')}")) + "│")
+            if i < len(planned_orders):
+                print("  │" + " " * 66 + "│")
+            continue
+        
         action = order.get('action', 'Unknown')
         strike = order.get('strike', 0)
         expiration = order.get('expiration', 'N/A')
@@ -3138,6 +3406,8 @@ def execute_trade(symbol, strategy):
                 strategy_names = {
                     "pc": "Protected Collar",
                     "pcs": "Put Credit Spread",
+                    "lps": "Laddered Put Spread",
+                    "tpd": "Tiered Put Diagonal",
                     "cs": "Collar",
                     "cc": "Covered Call",
                     "ws": "Wheel",

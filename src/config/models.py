@@ -169,6 +169,11 @@ class Config:
     tcc_min_roll_credit: float = 0.10  # Minimum credit required to execute a roll
     tcc_max_roll_days_out: int = 45  # Maximum days to expiration for roll targets
 
+    # Tiered Put Diagonal settings (tpd)
+    tpd_target_percent_below: float = 5.0  # How far below current price to target strikes (%)
+    tpd_num_tiers: int = 3  # Number of expiration tiers
+    tpd_tier_spacing_weeks: int = 1  # Weeks between each tier
+
     def validate(self) -> tuple[bool, Optional[str]]:
         """Validate the entire configuration.
 

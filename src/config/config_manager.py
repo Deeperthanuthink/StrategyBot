@@ -91,6 +91,7 @@ class ConfigManager:
         ss_config = strategies.get("ss", {})
         ic_config = strategies.get("ic", {})
         tcc_config = strategies.get("tcc", {})
+        tpd_config = strategies.get("tpd", {})
 
         # Create main config with type conversion error handling
         try:
@@ -178,6 +179,10 @@ class ConfigManager:
                 tcc_roll_execution_time=str(tcc_config.get("roll_execution_time", "15:30")),
                 tcc_min_roll_credit=float(tcc_config.get("min_roll_credit", 0.10)),
                 tcc_max_roll_days_out=int(tcc_config.get("max_roll_days_out", 45)),
+                # Tiered Put Diagonal settings
+                tpd_target_percent_below=float(tpd_config.get("target_percent_below", 5.0)),
+                tpd_num_tiers=int(tpd_config.get("num_tiers", 3)),
+                tpd_tier_spacing_weeks=int(tpd_config.get("tier_spacing_weeks", 1)),
             )
         except (ValueError, TypeError) as e:
             raise ValueError(

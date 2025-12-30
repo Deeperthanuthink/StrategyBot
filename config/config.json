@@ -108,6 +108,12 @@
       "roll_execution_time": "15:30",
       "min_roll_credit": 0.10,
       "max_roll_days_out": 45
+    },
+    "tpd": {
+      "name": "Tiered Put Diagonal",
+      "target_percent_below": 5.0,
+      "num_tiers": 3,
+      "tier_spacing_weeks": 1
     }
   },
   "brokers": {
