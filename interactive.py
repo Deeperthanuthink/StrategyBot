@@ -373,8 +373,21 @@ def select_strategy(symbol, shares_owned, broker_client=None):
     
     if shares_owned > 0 or broker_client:
         position_info = []
-        if shares_owned > 0:
-            position_info.append(f"{shares_owned} shares")
+        actual_stock_shares = 0
+        
+        # Get actual stock shares (not including long call equivalents)
+        if broker_client:
+            try:
+                position = broker_client.get_position(symbol)
+                if position:
+                    actual_stock_shares = position.quantity
+            except Exception:
+                actual_stock_shares = shares_owned  # Fallback to total if we can't get position
+        else:
+            actual_stock_shares = shares_owned
+        
+        if actual_stock_shares > 0:
+            position_info.append(f"{actual_stock_shares} shares")
         
         # Get long calls and puts if broker_client is available
         if broker_client:
@@ -541,9 +554,20 @@ def select_strategy(symbol, shares_owned, broker_client=None):
             sys.exit(0)
 
 
-def confirm_execution(symbol, strategy, shares_owned):
-    """Confirm the trade execution with user."""
+def confirm_execution(symbol, strategy, shares_owned, shares_for_legs=None):
+    """Confirm the trade execution with user.
+    
+    Args:
+        symbol: Stock symbol
+        strategy: Strategy code
+        shares_owned: Actual shares owned (for display and calculations)
+        shares_for_legs: Total equivalent shares for determining number of legs (optional, defaults to shares_owned)
+    """
     has_100_shares = shares_owned >= 100
+    
+    # If shares_for_legs not provided, use shares_owned
+    if shares_for_legs is None:
+        shares_for_legs = shares_owned
 
     strategy_names = {
         "pc": "Protected Collar",
@@ -603,12 +627,31 @@ def confirm_execution(symbol, strategy, shares_owned):
             print(f"  Strike:     ~5% below current price")
         print(f"  Expiry:     ~15 days out")
     if strategy == "lcc":
+        # Calculate dynamic number of legs based on total equivalent shares (including long calls)
+        # 500+ shares = 5 legs, 400-499 = 4 legs, 300-399 = 3 legs, 200-299 = 2 legs, 100-199 = 1 leg
+        if shares_for_legs >= 500:
+            num_legs = 5
+        elif shares_for_legs >= 400:
+            num_legs = 4
+        elif shares_for_legs >= 300:
+            num_legs = 3
+        elif shares_for_legs >= 200:
+            num_legs = 2
+        else:
+            num_legs = 1
+        
         total_contracts = int((shares_owned * 0.667) // 100)
+        percentage_per_leg = 100 // num_legs if num_legs > 0 else 100
+        
+        print(f"  Shares:     {shares_owned} (actual stock shares)")
+        if shares_for_legs != shares_owned:
+            print(f"  Equivalent: {shares_for_legs} shares (including long calls)")
         print(f"  Coverage:   2/3 of holdings ({total_contracts} contracts)")
-        print(f"  Legs:       5 weekly expirations (20% each)")
+        print(f"  Legs:       {num_legs} next available expirations (~{percentage_per_leg}% each)")
         print(f"  Strike:     ~5% above current price")
     if strategy == "tcc":
         total_contracts = shares_owned // 100
+        print(f"  Shares:     {shares_owned} (actual stock shares)")
         print(f"  Coverage:   Up to {total_contracts} contracts across 3 expirations")
         print(f"  Structure:  3 groups with incremental strike prices")
         print(f"  Strikes:    Progressive OTM strikes (higher for longer expirations)")
@@ -960,11 +1003,12 @@ def display_tiered_strategy_preview(plan):
     print()
 
 
-def confirm_tiered_execution(plan):
+def confirm_tiered_execution(plan, broker_client=None):
     """Confirm tiered covered call strategy execution with user.
     
     Args:
         plan: TieredCoveredCallPlan object with strategy details
+        broker_client: Optional broker client for buying power info
         
     Returns:
         bool: True if user confirms execution, False otherwise
@@ -983,12 +1027,32 @@ def confirm_tiered_execution(plan):
     print(f"  │ Total Contracts: {plan.total_contracts:<30} │")
     print(f"  │ Est. Premium:    ${plan.estimated_premium:<29.2f} │")
     
+    # Collateral for covered calls is $0 (shares are collateral)
+    print(f"  │ Collateral:      $0.00 (shares are collateral) │")
+    
     # Add cost basis reduction if available
     if hasattr(plan, 'original_cost_basis') and plan.original_cost_basis is not None:
         if hasattr(plan, 'effective_cost_basis') and plan.effective_cost_basis is not None:
             reduction_amount = plan.original_cost_basis - plan.effective_cost_basis
             reduction_percentage = (reduction_amount / plan.original_cost_basis) * 100 if plan.original_cost_basis > 0 else 0
             print(f"  │ Cost Basis Reduction: {reduction_percentage:<26.1f}% │")
+    
+    # Get and show buying power impact if broker client available
+    if broker_client:
+        try:
+            account_info = broker_client.get_account()
+            if hasattr(account_info, 'buying_power'):
+                current_bp = float(account_info.buying_power)
+                # Covered calls increase buying power (credit received, no collateral)
+                bp_impact = -plan.estimated_premium  # Negative because it increases BP
+                remaining_bp = current_bp - bp_impact
+                
+                print(f"  │ Current Buying Power: ${current_bp:<25,.2f} │")
+                print(f"  │ BP Impact:       +${abs(bp_impact):<29,.2f} │")
+                print(f"  │ Remaining BP:    ${remaining_bp:<29,.2f} │")
+        except Exception:
+            # Silently fail if we can't get account info
+            pass
     
     print("  └" + "─" * 50 + "┘")
     
@@ -2052,7 +2116,7 @@ def execute_tiered_covered_calls(symbol, broker_client, config):
         display_tiered_strategy_preview(strategy_plan)
         
         # Get user confirmation
-        if not confirm_tiered_execution(strategy_plan):
+        if not confirm_tiered_execution(strategy_plan, broker_client):
             return False
         
         # Display execution progress
@@ -2111,7 +2175,38 @@ def initialize_broker():
     return config, broker_client
 
 
-def calculate_planned_orders(trading_bot, symbol, strategy):
+def get_option_premium(trading_bot, symbol, strike, expiration, option_type):
+    """Get real-time option premium from broker.
+    
+    Args:
+        trading_bot: TradingBot instance
+        symbol: Stock symbol
+        strike: Strike price
+        expiration: Expiration date
+        option_type: 'call' or 'put'
+        
+    Returns:
+        float: Mid price of the option, or 0.50 as fallback
+    """
+    try:
+        # Format expiration date
+        expiration_str = expiration.strftime("%y%m%d")
+        
+        # Construct option symbol using OCC format
+        strike_str = f"{int(strike * 1000):08d}"
+        option_symbol = f"{symbol}{expiration_str}{option_type[0].upper()}{strike_str}"
+        
+        # Get quote
+        quotes = trading_bot.broker_client.get_option_quotes([option_symbol])
+        if quotes and option_symbol in quotes:
+            return quotes[option_symbol].get("mid", 0.50)
+    except Exception:
+        pass
+    
+    return 0.50  # Fallback default
+
+
+def calculate_planned_orders(trading_bot, symbol, strategy, shares_owned=None):
     """Calculate planned orders for verification display.
     
     This function calculates what orders would be placed without actually
@@ -2121,6 +2216,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
         trading_bot: Initialized TradingBot instance
         symbol: Stock symbol
         strategy: Strategy code
+        shares_owned: Number of shares owned (for strategies that need it like LCC)
         
     Returns:
         List of order dictionaries with details for display
@@ -2364,13 +2460,6 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                             # Select the nearest available strike to our target
                             short_strike = min(available_strikes, key=lambda x: abs(x - target_strike))
                             
-                            # Validate: short strike should be above long put strike for proper diagonal
-                            # (short put closer to money, long put provides protection below)
-                            if short_strike <= long_put_strike:
-                                print(f"  ⚠️  Skipping tier {tier_idx} - calculated strike ${short_strike} is at or below long put ${long_put_strike}")
-                                print(f"     Current price: ${current_price:.2f}, Target: ${target_strike:.2f}")
-                                continue
-                            
                             # Get quote for pricing
                             short_put = next((opt for opt in put_options if opt.strike == short_strike), None)
                             
@@ -2426,6 +2515,9 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 available_strikes=available_strikes
             )
             
+            # Get real-time premium
+            estimated_credit = get_option_premium(trading_bot, symbol, call_strike, expiration, 'call')
+            
             planned_orders.append({
                 'type': 'option',
                 'action': 'SELL',
@@ -2433,7 +2525,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': 1,
                 'option_type': 'CALL',
-                'estimated_price': 0
+                'estimated_price': estimated_credit
             })
             
         elif strategy in ["pc", "cs"]:
@@ -2463,6 +2555,10 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 available_strikes=call_strikes
             )
             
+            # Get real-time premiums
+            put_debit = get_option_premium(trading_bot, symbol, put_strike, expiration, 'put')
+            call_credit = get_option_premium(trading_bot, symbol, call_strike, expiration, 'call')
+            
             planned_orders.append({
                 'type': 'option',
                 'action': 'BUY',
@@ -2470,7 +2566,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': 1,
                 'option_type': 'PUT',
-                'estimated_price': 0
+                'estimated_price': put_debit
             })
             planned_orders.append({
                 'type': 'option',
@@ -2479,7 +2575,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': 1,
                 'option_type': 'CALL',
-                'estimated_price': 0
+                'estimated_price': call_credit
             })
             
         elif strategy == "ws":
@@ -2494,6 +2590,9 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 call_strike = round(call_strike)
                 expiration = date.today() + timedelta(days=trading_bot.config.wheel_expiration_days)
                 
+                # Get real-time premium
+                estimated_credit = get_option_premium(trading_bot, symbol, call_strike, expiration, 'call')
+                
                 planned_orders.append({
                     'type': 'option',
                     'action': 'SELL',
@@ -2501,13 +2600,16 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                     'expiration': expiration.strftime('%m/%d/%Y'),
                     'quantity': position.quantity // 100,
                     'option_type': 'CALL',
-                    'estimated_price': 0
+                    'estimated_price': estimated_credit
                 })
             else:
                 # Cash-secured put phase
                 put_strike = current_price * (1 - trading_bot.config.wheel_put_offset_percent / 100)
                 put_strike = round(put_strike)
                 expiration = date.today() + timedelta(days=trading_bot.config.wheel_expiration_days)
+                
+                # Get real-time premium
+                estimated_credit = get_option_premium(trading_bot, symbol, put_strike, expiration, 'put')
                 
                 planned_orders.append({
                     'type': 'option',
@@ -2516,7 +2618,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                     'expiration': expiration.strftime('%m/%d/%Y'),
                     'quantity': 1,
                     'option_type': 'PUT',
-                    'estimated_price': 0
+                    'estimated_price': estimated_credit
                 })
                 
         elif strategy == "mp":
@@ -2524,6 +2626,9 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
             put_strike = current_price * (1 - trading_bot.config.mp_put_offset_percent / 100)
             put_strike = round(put_strike)
             expiration = date.today() + timedelta(days=trading_bot.config.mp_expiration_days)
+            
+            # Get real-time premium for put
+            put_debit = get_option_premium(trading_bot, symbol, put_strike, expiration, 'put')
             
             planned_orders.append({
                 'type': 'stock',
@@ -2541,13 +2646,17 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': 1,
                 'option_type': 'PUT',
-                'estimated_price': 0
+                'estimated_price': put_debit
             })
             
         elif strategy == "ls":
             # Long Straddle
             atm_strike = round(current_price)
             expiration = date.today() + timedelta(days=trading_bot.config.ls_expiration_days)
+            
+            # Get real-time premiums
+            call_debit = get_option_premium(trading_bot, symbol, atm_strike, expiration, 'call')
+            put_debit = get_option_premium(trading_bot, symbol, atm_strike, expiration, 'put')
             
             planned_orders.append({
                 'type': 'option',
@@ -2556,7 +2665,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': trading_bot.config.ls_num_contracts,
                 'option_type': 'CALL',
-                'estimated_price': 0
+                'estimated_price': call_debit
             })
             planned_orders.append({
                 'type': 'option',
@@ -2565,7 +2674,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': trading_bot.config.ls_num_contracts,
                 'option_type': 'PUT',
-                'estimated_price': 0
+                'estimated_price': put_debit
             })
             
         elif strategy == "ib":
@@ -2574,6 +2683,12 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
             wing_width = trading_bot.config.ib_wing_width
             expiration = date.today() + timedelta(days=trading_bot.config.ib_expiration_days)
             
+            # Fetch premiums for all legs
+            long_put_premium = get_option_premium(trading_bot, symbol, atm_strike - wing_width, expiration, 'put')
+            short_put_premium = get_option_premium(trading_bot, symbol, atm_strike, expiration, 'put')
+            short_call_premium = get_option_premium(trading_bot, symbol, atm_strike, expiration, 'call')
+            long_call_premium = get_option_premium(trading_bot, symbol, atm_strike + wing_width, expiration, 'call')
+            
             planned_orders.append({
                 'type': 'option',
                 'action': 'BUY',
@@ -2581,7 +2696,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': trading_bot.config.ib_num_contracts,
                 'option_type': 'PUT',
-                'estimated_price': 0
+                'estimated_price': long_put_premium
             })
             planned_orders.append({
                 'type': 'option',
@@ -2590,7 +2705,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': trading_bot.config.ib_num_contracts,
                 'option_type': 'PUT',
-                'estimated_price': 0
+                'estimated_price': short_put_premium
             })
             planned_orders.append({
                 'type': 'option',
@@ -2599,7 +2714,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': trading_bot.config.ib_num_contracts,
                 'option_type': 'CALL',
-                'estimated_price': 0
+                'estimated_price': short_call_premium
             })
             planned_orders.append({
                 'type': 'option',
@@ -2608,7 +2723,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': trading_bot.config.ib_num_contracts,
                 'option_type': 'CALL',
-                'estimated_price': 0
+                'estimated_price': long_call_premium
             })
             
         elif strategy == "ic":
@@ -2620,6 +2735,16 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
             spread_width = trading_bot.config.ic_spread_width
             expiration = date.today() + timedelta(days=trading_bot.config.ic_expiration_days)
             
+            # Fetch premiums for put spread
+            put_short_premium = get_option_premium(trading_bot, symbol, put_short, expiration, 'put')
+            put_long_premium = get_option_premium(trading_bot, symbol, put_short - spread_width, expiration, 'put')
+            put_spread_credit = put_short_premium - put_long_premium
+            
+            # Fetch premiums for call spread
+            call_short_premium = get_option_premium(trading_bot, symbol, call_short, expiration, 'call')
+            call_long_premium = get_option_premium(trading_bot, symbol, call_short + spread_width, expiration, 'call')
+            call_spread_credit = call_short_premium - call_long_premium
+            
             planned_orders.append({
                 'type': 'spread',
                 'action': 'SELL',
@@ -2629,7 +2754,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': trading_bot.config.ic_num_contracts,
                 'option_type': 'PUT SPREAD',
-                'estimated_price': 0
+                'estimated_price': put_spread_credit
             })
             planned_orders.append({
                 'type': 'spread',
@@ -2640,7 +2765,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': trading_bot.config.ic_num_contracts,
                 'option_type': 'CALL SPREAD',
-                'estimated_price': 0
+                'estimated_price': call_spread_credit
             })
             
         elif strategy == "ss":
@@ -2651,6 +2776,10 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
             call_strike = round(call_strike)
             expiration = date.today() + timedelta(days=trading_bot.config.ss_expiration_days)
             
+            # Fetch premiums
+            put_premium = get_option_premium(trading_bot, symbol, put_strike, expiration, 'put')
+            call_premium = get_option_premium(trading_bot, symbol, call_strike, expiration, 'call')
+            
             planned_orders.append({
                 'type': 'option',
                 'action': 'SELL',
@@ -2658,7 +2787,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': trading_bot.config.ss_num_contracts,
                 'option_type': 'PUT',
-                'estimated_price': 0
+                'estimated_price': put_premium
             })
             planned_orders.append({
                 'type': 'option',
@@ -2667,7 +2796,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': trading_bot.config.ss_num_contracts,
                 'option_type': 'CALL',
-                'estimated_price': 0
+                'estimated_price': call_premium
             })
             
         elif strategy == "jl":
@@ -2680,6 +2809,11 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
             call_long = round(call_long)
             expiration = date.today() + timedelta(days=30)
             
+            # Fetch premiums
+            put_premium = get_option_premium(trading_bot, symbol, put_strike, expiration, 'put')
+            call_short_premium = get_option_premium(trading_bot, symbol, call_short, expiration, 'call')
+            call_long_premium = get_option_premium(trading_bot, symbol, call_long, expiration, 'call')
+            
             planned_orders.append({
                 'type': 'option',
                 'action': 'SELL',
@@ -2687,7 +2821,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': 1,
                 'option_type': 'PUT',
-                'estimated_price': 0
+                'estimated_price': put_premium
             })
             planned_orders.append({
                 'type': 'option',
@@ -2696,7 +2830,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': 1,
                 'option_type': 'CALL',
-                'estimated_price': 0
+                'estimated_price': call_short_premium
             })
             planned_orders.append({
                 'type': 'option',
@@ -2705,7 +2839,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': 1,
                 'option_type': 'CALL',
-                'estimated_price': 0
+                'estimated_price': call_long_premium
             })
             
         elif strategy == "bl":
@@ -2715,6 +2849,11 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
             call_long = round(call_long)
             expiration = date.today() + timedelta(days=30)
             
+            # Fetch premiums
+            put_premium = get_option_premium(trading_bot, symbol, atm_strike, expiration, 'put')
+            call_short_premium = get_option_premium(trading_bot, symbol, atm_strike, expiration, 'call')
+            call_long_premium = get_option_premium(trading_bot, symbol, call_long, expiration, 'call')
+            
             planned_orders.append({
                 'type': 'option',
                 'action': 'SELL',
@@ -2722,7 +2861,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': 1,
                 'option_type': 'PUT',
-                'estimated_price': 0
+                'estimated_price': put_premium
             })
             planned_orders.append({
                 'type': 'option',
@@ -2731,7 +2870,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': 1,
                 'option_type': 'CALL',
-                'estimated_price': 0
+                'estimated_price': call_short_premium
             })
             planned_orders.append({
                 'type': 'option',
@@ -2740,7 +2879,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': 1,
                 'option_type': 'CALL',
-                'estimated_price': 0
+                'estimated_price': call_long_premium
             })
             
         elif strategy == "dc":
@@ -2752,6 +2891,14 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
             short_exp = date.today() + timedelta(days=trading_bot.config.dc_short_days)
             long_exp = date.today() + timedelta(days=trading_bot.config.dc_long_days)
             
+            # Fetch premiums for put calendar
+            put_short_premium = get_option_premium(trading_bot, symbol, put_strike, short_exp, 'put')
+            put_long_premium = get_option_premium(trading_bot, symbol, put_strike, long_exp, 'put')
+            
+            # Fetch premiums for call calendar
+            call_short_premium = get_option_premium(trading_bot, symbol, call_strike, short_exp, 'call')
+            call_long_premium = get_option_premium(trading_bot, symbol, call_strike, long_exp, 'call')
+            
             # Put calendar
             planned_orders.append({
                 'type': 'option',
@@ -2760,7 +2907,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': short_exp.strftime('%m/%d/%Y'),
                 'quantity': 1,
                 'option_type': 'PUT (short exp)',
-                'estimated_price': 0
+                'estimated_price': put_short_premium
             })
             planned_orders.append({
                 'type': 'option',
@@ -2769,7 +2916,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': long_exp.strftime('%m/%d/%Y'),
                 'quantity': 1,
                 'option_type': 'PUT (long exp)',
-                'estimated_price': 0
+                'estimated_price': put_long_premium
             })
             # Call calendar
             planned_orders.append({
@@ -2779,7 +2926,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': short_exp.strftime('%m/%d/%Y'),
                 'quantity': 1,
                 'option_type': 'CALL (short exp)',
-                'estimated_price': 0
+                'estimated_price': call_short_premium
             })
             planned_orders.append({
                 'type': 'option',
@@ -2788,7 +2935,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': long_exp.strftime('%m/%d/%Y'),
                 'quantity': 1,
                 'option_type': 'CALL (long exp)',
-                'estimated_price': 0
+                'estimated_price': call_long_premium
             })
             
         elif strategy == "bf":
@@ -2797,6 +2944,11 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
             wing_width = trading_bot.config.bf_wing_width
             expiration = date.today() + timedelta(days=trading_bot.config.bf_expiration_days)
             
+            # Fetch premiums
+            lower_wing_premium = get_option_premium(trading_bot, symbol, atm_strike - wing_width, expiration, 'call')
+            atm_premium = get_option_premium(trading_bot, symbol, atm_strike, expiration, 'call')
+            upper_wing_premium = get_option_premium(trading_bot, symbol, atm_strike + wing_width, expiration, 'call')
+            
             planned_orders.append({
                 'type': 'option',
                 'action': 'BUY',
@@ -2804,7 +2956,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': 1,
                 'option_type': 'CALL',
-                'estimated_price': 0
+                'estimated_price': lower_wing_premium
             })
             planned_orders.append({
                 'type': 'option',
@@ -2813,7 +2965,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': 2,
                 'option_type': 'CALL',
-                'estimated_price': 0
+                'estimated_price': atm_premium
             })
             planned_orders.append({
                 'type': 'option',
@@ -2822,7 +2974,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': 1,
                 'option_type': 'CALL',
-                'estimated_price': 0
+                'estimated_price': upper_wing_premium
             })
             
         elif strategy == "bwb":
@@ -2832,6 +2984,11 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
             upper_wing = 10
             expiration = date.today() + timedelta(days=30)
             
+            # Fetch premiums
+            lower_wing_premium = get_option_premium(trading_bot, symbol, atm_strike - lower_wing, expiration, 'call')
+            atm_premium = get_option_premium(trading_bot, symbol, atm_strike, expiration, 'call')
+            upper_wing_premium = get_option_premium(trading_bot, symbol, atm_strike + upper_wing, expiration, 'call')
+            
             planned_orders.append({
                 'type': 'option',
                 'action': 'BUY',
@@ -2839,7 +2996,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': 1,
                 'option_type': 'CALL',
-                'estimated_price': 0
+                'estimated_price': lower_wing_premium
             })
             planned_orders.append({
                 'type': 'option',
@@ -2848,7 +3005,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': 2,
                 'option_type': 'CALL',
-                'estimated_price': 0
+                'estimated_price': atm_premium
             })
             planned_orders.append({
                 'type': 'option',
@@ -2857,7 +3014,7 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
                 'expiration': expiration.strftime('%m/%d/%Y'),
                 'quantity': 1,
                 'option_type': 'CALL',
-                'estimated_price': 0
+                'estimated_price': upper_wing_premium
             })
             
         elif strategy == "metf":
@@ -3085,17 +3242,66 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
             call_strike = current_price * (1 + trading_bot.config.laddered_call_offset_percent / 100)
             call_strike = round(call_strike)
             
-            for i in range(trading_bot.config.laddered_num_legs):
-                exp_date = date.today() + timedelta(weeks=i+1)
-                planned_orders.append({
-                    'type': 'option',
-                    'action': 'SELL',
-                    'strike': call_strike,
-                    'expiration': exp_date.strftime('%m/%d/%Y'),
-                    'quantity': 1,
-                    'option_type': f'CALL (Week {i+1})',
-                    'estimated_price': 0
-                })
+            # Calculate dynamic number of legs based on shares owned
+            # 500+ shares = 5 legs, 400-499 = 4 legs, 300-399 = 3 legs, 200-299 = 2 legs, 100-199 = 1 leg
+            if shares_owned is None:
+                # Fallback to config if shares not provided
+                dynamic_num_legs = trading_bot.config.laddered_num_legs
+            elif shares_owned >= 500:
+                dynamic_num_legs = 5
+            elif shares_owned >= 400:
+                dynamic_num_legs = 4
+            elif shares_owned >= 300:
+                dynamic_num_legs = 3
+            elif shares_owned >= 200:
+                dynamic_num_legs = 2
+            else:
+                dynamic_num_legs = 1
+            
+            # Get available expirations from broker
+            try:
+                available_expirations = trading_bot.broker_client.get_option_expirations(symbol)
+                # Filter to future dates only
+                today = date.today()
+                future_expirations = [exp for exp in available_expirations if exp > today]
+                
+                if not future_expirations:
+                    print(f"  ⚠️  No future expirations available for {symbol}")
+                    return None
+                
+                # Take the next N available expirations based on shares owned
+                num_legs = min(dynamic_num_legs, len(future_expirations))
+                selected_expirations = future_expirations[:num_legs]
+                
+                for i, exp_date in enumerate(selected_expirations):
+                    # Fetch premium for this leg
+                    call_premium = get_option_premium(trading_bot, symbol, call_strike, exp_date, 'call')
+                    
+                    planned_orders.append({
+                        'type': 'option',
+                        'action': 'SELL',
+                        'strike': call_strike,
+                        'expiration': exp_date.strftime('%m/%d/%Y'),
+                        'quantity': 1,
+                        'option_type': f'CALL (Exp {i+1})',
+                        'estimated_price': call_premium
+                    })
+            except Exception as e:
+                print(f"  ⚠️  Could not get option expirations: {str(e)}")
+                # Fallback to weekly calculation
+                for i in range(dynamic_num_legs):
+                    exp_date = date.today() + timedelta(weeks=i+1)
+                    call_premium = get_option_premium(trading_bot, symbol, call_strike, exp_date, 'call')
+                    
+                    planned_orders.append({
+                        'type': 'option',
+                        'action': 'SELL',
+                        'strike': call_strike,
+                        'expiration': exp_date.strftime('%m/%d/%Y'),
+                        'quantity': 1,
+                        'option_type': f'CALL (Week {i+1})',
+                        'estimated_price': call_premium
+                    })
         
         else:
             # Generic fallback
@@ -3118,7 +3324,76 @@ def calculate_planned_orders(trading_bot, symbol, strategy):
     return planned_orders
 
 
-def verify_planned_orders(symbol, strategy, planned_orders):
+def calculate_collateral_requirement(order, symbol, current_price=None):
+    """Calculate collateral requirement for an option order.
+    
+    Collateral requirements by strategy:
+    - Covered Call: $0 (shares are collateral)
+    - Cash-Secured Put: Strike × 100 × Quantity
+    - Credit Spreads (PCS, IC): Spread width × 100 × Quantity
+    - Debit Spreads: $0 (just premium paid)
+    - Long Options (MP, LS): $0 (just premium paid)
+    - Short Straddle/Strangle: Strike × 100 × Quantity (for puts) + margin for calls
+    - Iron Butterfly: Max(put spread width, call spread width) × 100 × Quantity
+    - Butterflies/Calendars: $0 or minimal (net debit strategies)
+    
+    Args:
+        order: Order dictionary with order details
+        symbol: Stock symbol
+        current_price: Current stock price (optional, for margin calculations)
+        
+    Returns:
+        float: Collateral requirement in dollars
+    """
+    order_type = order.get('type', 'Unknown')
+    action = order.get('action', '').upper()
+    quantity = order.get('quantity', 1)
+    
+    # No collateral needed for buying options (just the premium paid)
+    if action in ['BUY', 'BTO', 'BUY TO OPEN']:
+        return 0.0
+    
+    # Single leg options
+    if order_type == 'option' and action in ['SELL', 'STO', 'SELL TO OPEN']:
+        option_type = order.get('option_type', '').upper()
+        strike = order.get('strike', 0)
+        
+        if 'CALL' in option_type:
+            # Covered call - assumes you own the shares (no additional collateral)
+            # For naked calls (not covered), would need: 20% of stock value + premium - OTM amount
+            # But we assume covered calls in this system
+            return 0.0
+        elif 'PUT' in option_type:
+            # Cash-secured put - need cash to buy shares at strike
+            return strike * 100 * quantity
+    
+    # Spreads
+    if order_type == 'spread':
+        spread_type = order.get('spread_type', '').lower()
+        short_strike = order.get('short_strike', 0)
+        long_strike = order.get('long_strike', 0)
+        
+        if spread_type == 'credit':
+            # Credit spread collateral = width of spread
+            # This applies to: PCS, Call Credit Spreads, Iron Condor legs
+            width = abs(short_strike - long_strike)
+            return width * 100 * quantity
+        else:
+            # Debit spread - no collateral, just the debit paid
+            # This applies to: Debit spreads, Calendars, Diagonals
+            return 0.0
+    
+    # Stock purchase (for Married Put strategy)
+    if order_type == 'stock':
+        stock_quantity = order.get('quantity', 0)
+        price = order.get('price', current_price or 0)
+        return price * stock_quantity
+    
+    # Default: no collateral calculated
+    return 0.0
+
+
+def verify_planned_orders(symbol, strategy, planned_orders, broker_client=None):
     """Display planned orders and get final verification before execution.
     
     This provides an additional layer of protection by showing exactly what
@@ -3291,6 +3566,9 @@ def verify_planned_orders(symbol, strategy, planned_orders):
     
     print("  ├" + "─" * 66 + "┤")
     
+    # Calculate total collateral requirement
+    total_collateral = sum(calculate_collateral_requirement(order, symbol) for order in planned_orders)
+    
     # Summary
     if total_credit > 0 or total_debit > 0:
         net = total_credit - total_debit
@@ -3298,6 +3576,31 @@ def verify_planned_orders(symbol, strategy, planned_orders):
             print(f"  │ 💰 NET ESTIMATED CREDIT: ${net:,.2f}" + " " * (66 - len(f" 💰 NET ESTIMATED CREDIT: ${net:,.2f}")) + "│")
         else:
             print(f"  │ 💸 NET ESTIMATED DEBIT: ${abs(net):,.2f}" + " " * (66 - len(f" 💸 NET ESTIMATED DEBIT: ${abs(net):,.2f}")) + "│")
+    
+    # Show collateral requirement
+    if total_collateral > 0:
+        print(f"  │ 🔒 COLLATERAL REQUIRED: ${total_collateral:,.2f}" + " " * (66 - len(f" 🔒 COLLATERAL REQUIRED: ${total_collateral:,.2f}")) + "│")
+    
+    # Get and show buying power impact if broker client available
+    if broker_client:
+        try:
+            account_info = broker_client.get_account()
+            if hasattr(account_info, 'buying_power'):
+                current_bp = float(account_info.buying_power)
+                # Buying power impact = collateral required - credit received + debit paid
+                bp_impact = total_collateral - total_credit + total_debit
+                remaining_bp = current_bp - bp_impact
+                
+                print(f"  │ 💵 CURRENT BUYING POWER: ${current_bp:,.2f}" + " " * (66 - len(f" 💵 CURRENT BUYING POWER: ${current_bp:,.2f}")) + "│")
+                print(f"  │ 📉 BUYING POWER IMPACT: -${bp_impact:,.2f}" + " " * (66 - len(f" 📉 BUYING POWER IMPACT: -${bp_impact:,.2f}")) + "│")
+                print(f"  │ 💳 REMAINING BUYING POWER: ${remaining_bp:,.2f}" + " " * (66 - len(f" 💳 REMAINING BUYING POWER: ${remaining_bp:,.2f}")) + "│")
+                
+                # Warning if insufficient buying power
+                if remaining_bp < 0:
+                    print(f"  │ ⚠️  WARNING: INSUFFICIENT BUYING POWER!" + " " * 31 + "│")
+        except Exception:
+            # Silently fail if we can't get account info
+            pass
     
     print("  └" + "─" * 66 + "┘")
     
@@ -3326,9 +3629,20 @@ def verify_planned_orders(symbol, strategy, planned_orders):
             sys.exit(0)
 
 
-def execute_trade(symbol, strategy):
-    """Execute the selected trade."""
+def execute_trade(symbol, strategy, shares_owned=None, shares_for_legs=None):
+    """Execute the selected trade.
+    
+    Args:
+        symbol: Stock symbol
+        strategy: Strategy code
+        shares_owned: Number of shares owned (for display and contract calculations)
+        shares_for_legs: Number of shares to use for determining number of legs (for LCC)
+    """
     suppress_output()
+    
+    # If shares_for_legs not provided, use shares_owned
+    if shares_for_legs is None:
+        shares_for_legs = shares_owned
 
     try:
         print()
@@ -3370,7 +3684,7 @@ def execute_trade(symbol, strategy):
 
             # Calculate planned orders for verification
             print("  ⏳ Calculating order parameters...")
-            planned_orders = calculate_planned_orders(trading_bot, actual_symbol, strategy)
+            planned_orders = calculate_planned_orders(trading_bot, actual_symbol, strategy, shares_for_legs)
             
             if not planned_orders:
                 print("  ❌ Could not calculate order parameters")
@@ -3381,7 +3695,7 @@ def execute_trade(symbol, strategy):
                 return False
             
             # Show verification prompt with planned orders
-            if not verify_planned_orders(actual_symbol, strategy, planned_orders):
+            if not verify_planned_orders(actual_symbol, strategy, planned_orders, trading_bot.broker_client):
                 return False
             
             # Now execute for real
@@ -3505,10 +3819,28 @@ def main():
 
         selected_strategy = select_strategy(selected_symbol, shares_owned, broker_client)
 
+        # For LCC and TCC strategies, get actual stock shares (not including long call equivalents)
+        if selected_strategy in ["lcc", "tcc"]:
+            # Get actual stock position only
+            position = broker_client.get_position(selected_symbol)
+            actual_stock_shares = position.quantity if position else 0
+            # For LCC: use total shares (including long calls) for leg calculation
+            # For TCC: use actual stock shares only
+            if selected_strategy == "lcc":
+                confirmation_shares = actual_stock_shares
+                shares_for_legs = shares_owned  # Use total including long calls for leg count
+            else:
+                confirmation_shares = actual_stock_shares
+                shares_for_legs = actual_stock_shares
+        else:
+            # For other strategies, use total shares including long call equivalents
+            confirmation_shares = shares_owned
+            shares_for_legs = shares_owned
+
         # Handle tiered covered calls with special workflow
         if selected_strategy == "tcc":
             # Confirm execution
-            if not confirm_execution(selected_symbol, selected_strategy, shares_owned):
+            if not confirm_execution(selected_symbol, selected_strategy, confirmation_shares, shares_for_legs):
                 print("\n  🚫 Trade cancelled")
                 sys.exit(0)
             
@@ -3516,12 +3848,12 @@ def main():
             success = execute_tiered_covered_calls(selected_symbol, broker_client, config)
         else:
             # Confirm execution
-            if not confirm_execution(selected_symbol, selected_strategy, shares_owned):
+            if not confirm_execution(selected_symbol, selected_strategy, confirmation_shares, shares_for_legs):
                 print("\n  🚫 Trade cancelled")
                 sys.exit(0)
 
-            # Execute the trade
-            success = execute_trade(selected_symbol, selected_strategy)
+            # Execute the trade (pass shares_for_legs for dynamic leg calculation)
+            success = execute_trade(selected_symbol, selected_strategy, confirmation_shares, shares_for_legs)
 
         print()
         if success:

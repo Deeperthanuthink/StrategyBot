@@ -849,14 +849,15 @@ class TradierClient(BaseBrokerClient):
                 )
             raise ValueError(f"Option chain unavailable for {symbol}") from e
 
-    def submit_spread_order(self, spread: SpreadOrder) -> OrderResult:
+    def submit_spread_order(self, spread: SpreadOrder, tag: str = None) -> OrderResult:
         """Submit a put credit spread order to Tradier using Lumibot.
 
         Args:
-            spread: SpreadOrder object with order details
+            spread: SpreadOrder object with spread details
+            tag: Optional order tag for tracking (e.g., strategy name)
 
         Returns:
-            OrderResult with order ID and status
+            OrderResult with success status and order details
         """
         try:
             # Format expiration date
@@ -925,6 +926,10 @@ class TradierClient(BaseBrokerClient):
                 "side[1]": "buy_to_open",
                 "quantity[1]": spread.quantity,
             }
+            
+            # Add tag if provided
+            if tag:
+                order_data["tag"] = tag
 
             # Get base URL from broker
             base_url = (

@@ -183,11 +183,12 @@ class BaseBrokerClient(ABC):
         pass
 
     @abstractmethod
-    def submit_spread_order(self, spread: SpreadOrder) -> OrderResult:
+    def submit_spread_order(self, spread: SpreadOrder, tag: str = None) -> OrderResult:
         """Submit a put credit spread order.
 
         Args:
             spread: SpreadOrder object with order details
+            tag: Optional order tag for tracking (e.g., strategy name)
 
         Returns:
             OrderResult with order ID and status

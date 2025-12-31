@@ -44,7 +44,7 @@
     },
     "lcc": {
       "name": "Laddered Covered Call",
-      "call_offset_percent": 5.0,
+      "call_offset_percent": 2.5,
       "call_offset_dollars": 0.0,
       "coverage_ratio": 0.667,
       "num_legs": 5

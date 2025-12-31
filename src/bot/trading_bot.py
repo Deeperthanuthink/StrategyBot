@@ -897,6 +897,32 @@ class TradingBot:
 
             # Submit order using OrderManager
             self.logger.log_info(f"Submitting order for {symbol}")
+            
+            # Get strategy name for tagging
+            strategy_names = {
+                "pc": "Protected Collar",
+                "pcs": "Put Credit Spread",
+                "lps": "Laddered Put Spread",
+                "tpd": "Tiered Put Diagonal",
+                "cs": "Collar Strategy",
+                "cc": "Covered Call",
+                "ws": "Wheel Strategy",
+                "lcc": "Laddered Covered Call",
+                "tcc": "Tiered Covered Calls",
+                "dc": "Double Calendar",
+                "bf": "Butterfly",
+                "bwb": "Broken Wing Butterfly",
+                "mp": "Married Put",
+                "ls": "Long Straddle",
+                "ib": "Iron Butterfly",
+                "ss": "Short Strangle",
+                "ic": "Iron Condor",
+                "jl": "Jade Lizard",
+                "bl": "Big Lizard",
+                "metf": "METF Strategy",
+            }
+            strategy_tag = strategy_names.get(self.config.strategy, self.config.strategy)
+            
             trade_result = self.order_manager.submit_order_with_error_handling(
                 symbol=symbol,
                 short_strike=short_strike,
@@ -904,6 +930,7 @@ class TradingBot:
                 expiration=expiration,
                 quantity=self.config.contract_quantity,
                 max_retries=3,
+                tag=strategy_tag,
             )
 
             return trade_result

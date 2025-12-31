@@ -144,12 +144,13 @@ class OrderManager:
 
         return True, None
 
-    def retry_order(self, order: SpreadOrder, max_retries: int = 3) -> OrderResult:
+    def retry_order(self, order: SpreadOrder, max_retries: int = 3, tag: str = None) -> OrderResult:
         """Submit order with retry logic and exponential backoff.
 
         Args:
             order: SpreadOrder to submit
             max_retries: Maximum number of retry attempts (default 3)
+            tag: Optional order tag for tracking (e.g., strategy name)
 
         Returns:
             OrderResult with final status
@@ -208,7 +209,7 @@ class OrderManager:
                     )
 
                     # Submit order through Alpaca client
-                    result = self.broker_client.submit_spread_order(order)
+                    result = self.broker_client.submit_spread_order(order, tag=tag)
 
                 if result.success:
                     self.logger.log_info(
@@ -331,6 +332,7 @@ class OrderManager:
         expiration: date,
         quantity: int,
         max_retries: int = 3,
+        tag: str = None,
     ) -> TradeResult:
         """Submit order with comprehensive error handling.
 
@@ -344,6 +346,7 @@ class OrderManager:
             expiration: Option expiration date
             quantity: Number of contracts
             max_retries: Maximum number of retry attempts
+            tag: Optional order tag for tracking (e.g., strategy name)
 
         Returns:
             TradeResult with execution details
@@ -361,7 +364,7 @@ class OrderManager:
             )
 
             # Submit with retry logic
-            result = self.retry_order(order, max_retries=max_retries)
+            result = self.retry_order(order, max_retries=max_retries, tag=tag)
 
             # Create trade result
             trade_result = TradeResult(

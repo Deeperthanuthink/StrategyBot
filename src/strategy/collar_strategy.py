@@ -606,19 +606,39 @@ class LadderedCoveredCallCalculator:
         Returns:
             Number of contracts per leg (minimum 1 if eligible)
         """
-        # Total contracts to cover (2/3 of holdings)
-        total_contracts = int((shares_owned * self.coverage_ratio) // 100)
+        # Total contracts to cover (e.g., 2/3 of holdings)
+        # First convert shares to contracts, then apply coverage ratio
+        total_contracts_available = shares_owned // 100
+        total_contracts = int(total_contracts_available * self.coverage_ratio)
 
         if total_contracts < self.num_legs:
             # Not enough for full ladder, return 1 per leg up to total
             return 1 if total_contracts > 0 else 0
 
-        # Divide evenly across legs (20% each)
+        # Divide evenly across legs (20% each for 5 legs)
         return total_contracts // self.num_legs
 
     def calculate_total_contracts(self, shares_owned: int) -> int:
-        """Calculate total contracts across all legs."""
-        return int((shares_owned * self.coverage_ratio) // 100)
+        """Calculate total contracts across all legs.
+        
+        Args:
+            shares_owned: Total shares owned
+            
+        Returns:
+            Total number of contracts (each contract = 100 shares)
+        """
+        # First convert shares to contracts (100 shares = 1 contract)
+        total_contracts_available = shares_owned // 100
+        
+        # Apply coverage ratio (e.g., 2/3 of holdings)
+        # But ensure at least 1 contract if we have 100+ shares
+        covered_contracts = int(total_contracts_available * self.coverage_ratio)
+        
+        # If we have shares but coverage ratio rounds to 0, use at least 1 contract
+        if covered_contracts == 0 and total_contracts_available >= 1:
+            return 1
+            
+        return covered_contracts
 
     def calculate_expirations(self, from_date: date = None) -> list:
         """Calculate 5 weekly expiration dates (Fridays).

@@ -318,8 +318,16 @@ class AlpacaClient(BaseBrokerClient):
                 self.logger.log_error(f"Error getting option chain for {symbol}: {str(e)}", e)
             raise ValueError(f"Option chain unavailable for {symbol}") from e
 
-    def submit_spread_order(self, spread: SpreadOrder) -> OrderResult:
-        """Submit a put credit spread order."""
+    def submit_spread_order(self, spread: SpreadOrder, tag: str = None) -> OrderResult:
+        """Submit a put credit spread order.
+        
+        Args:
+            spread: SpreadOrder object with order details
+            tag: Optional order tag for tracking (e.g., strategy name)
+            
+        Returns:
+            OrderResult with order ID and status
+        """
         try:
             expiration_str = spread.expiration.strftime("%y%m%d")
             short_strike_str = f"{int(spread.short_strike * 1000):08d}"
