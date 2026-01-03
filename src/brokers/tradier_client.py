@@ -42,6 +42,7 @@ class TradierClient(BaseBrokerClient):
         """
         self.api_token = api_token
         self.account_id = account_id
+        self.base_url = base_url
         self.logger = logger
 
         # Determine if using sandbox
@@ -1196,6 +1197,89 @@ class TradierClient(BaseBrokerClient):
             if self.logger:
                 self.logger.log_error(error_msg, e, {"error_type": type(e).__name__})
             raise
+
+    def get_pending_orders(self, symbol: str = None) -> List[Dict]:
+        """Get pending/open orders from Tradier API.
+        
+        Args:
+            symbol: Optional symbol to filter orders. If None, returns all pending orders.
+            
+        Returns:
+            List of pending order dictionaries with order details
+        """
+        try:
+            import requests
+            
+            base_url = self.base_url
+            
+            # Get orders from Tradier API
+            response = requests.get(
+                f"{base_url}/v1/accounts/{self.account_id}/orders",
+                headers={
+                    "Authorization": f"Bearer {self.api_token}",
+                    "Accept": "application/json"
+                },
+                timeout=10
+            )
+            
+            if response.status_code != 200:
+                if self.logger:
+                    self.logger.log_warning(
+                        f"Failed to fetch pending orders: HTTP {response.status_code}",
+                        {"status_code": response.status_code}
+                    )
+                return []
+            
+            data = response.json()
+            orders_data = data.get("orders", {})
+            
+            # Handle both single order and multiple orders
+            if not orders_data:
+                return []
+            
+            order_list = orders_data.get("order", [])
+            if not isinstance(order_list, list):
+                order_list = [order_list] if order_list else []
+            
+            # Filter for pending orders (open, pending, partially_filled)
+            pending_statuses = ["open", "pending", "partially_filled", "submitted"]
+            pending_orders = []
+            
+            for order in order_list:
+                status = order.get("status", "").lower()
+                if status in pending_statuses:
+                    # Filter by symbol if provided
+                    order_symbol = order.get("symbol", "")
+                    if symbol is None or order_symbol.startswith(symbol):
+                        pending_orders.append({
+                            "id": order.get("id"),
+                            "symbol": order_symbol,
+                            "side": order.get("side"),
+                            "quantity": order.get("quantity", 0),
+                            "type": order.get("type"),
+                            "status": status,
+                            "price": order.get("price"),
+                            "option_symbol": order.get("option_symbol"),
+                            "class": order.get("class"),
+                            "created_at": order.get("create_date")
+                        })
+            
+            if self.logger:
+                self.logger.log_info(
+                    f"Retrieved pending orders",
+                    {
+                        "total_pending": len(pending_orders),
+                        "symbol_filter": symbol or "all"
+                    }
+                )
+            
+            return pending_orders
+            
+        except Exception as e:
+            error_msg = f"Error fetching pending orders: {str(e)}"
+            if self.logger:
+                self.logger.log_error(error_msg, e)
+            return []
 
     def get_positions(self) -> list:
         """Get all current stock positions from Tradier.

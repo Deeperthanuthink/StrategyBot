@@ -354,6 +354,12 @@ def select_strategy(symbol, shares_owned, broker_client=None):
     print("  │ ws  │ Wheel Strategy   │ Auto-cycle puts/calls     │")
     print("  │ mp  │ Married Put      │ Buy shares + protective put│")
     print("  └─────┴──────────────────┴──────────────────────────┘")
+    
+    print()
+    print("🔹 MANAGEMENT STRATEGIES")
+    print("  ┌─────┬──────────────────┬──────────────────────────┐")
+    print("  │ritmo│ Roll ITM Options │ Roll expiring ITM options │")
+    print("  └─────┴──────────────────┴──────────────────────────┘")
 
     print()
     print("🔹 STOCK-BASED STRATEGIES" + (" (Available)" if has_100_shares else " (Need 100+ shares)"))
@@ -544,9 +550,14 @@ def select_strategy(symbol, shares_owned, broker_client=None):
                 print("     📈 20 EMA > 40 EMA → Put Credit Spread (bullish)")
                 print("     📉 20 EMA < 40 EMA → Call Credit Spread (bearish)")
                 return "metf"
+            elif choice == "ritmo":
+                print("  ✅ Selected: Roll In The Money Options (RITMO)")
+                print("     📝 Automatically rolls expiring ITM options to next expiration")
+                print("     💡 Keeps same strike, extends time for recovery")
+                return "ritmo"
             else:
                 print(
-                    "  ❌ Enter 'pc', 'pcs', 'cs', 'cc', 'ws', 'lcc', 'tcc', 'dc', 'bf', 'bwb', 'mp', 'ls', 'ib', 'ss', 'ic', 'jl', 'bl', or 'metf'"
+                    "  ❌ Enter 'pc', 'pcs', 'cs', 'cc', 'ws', 'lcc', 'tcc', 'dc', 'bf', 'bwb', 'mp', 'ls', 'ib', 'ss', 'ic', 'jl', 'bl', 'metf', or 'ritmo'"
                 )
 
         except KeyboardInterrupt:
@@ -589,7 +600,8 @@ def confirm_execution(symbol, strategy, shares_owned, shares_for_legs=None):
         "ic": "Iron Condor",
         "jl": "Jade Lizard",
         "bl": "Big Lizard ⚠️",
-        "metf": "METF Strategy (SPX 0DTE)"
+        "metf": "METF Strategy (SPX 0DTE)",
+        "ritmo": "Roll In The Money Options"
     }
     strategy_name = strategy_names.get(strategy, strategy)
 
@@ -741,6 +753,13 @@ def confirm_execution(symbol, strategy, shares_owned, shares_for_legs=None):
         print(f"  Stop:       1x credit received (100% of premium)")
         print(f"  Hold:       Till expiration")
         print(f"  ⚠️ Avoid:   FOMC days and FOMC Minutes days")
+    if strategy == "ritmo":
+        print(f"  Action:     Roll expiring ITM options to next expiration")
+        print(f"  Target:     Options expiring TODAY that are in-the-money")
+        print(f"  New Expiry: Next available expiration date")
+        print(f"  Strike:     Keep same strike price")
+        print(f"  💡 Benefit: Extend time for recovery, collect additional credit")
+        print(f"  ⚠️ Note:    Only rolls if net credit meets minimum threshold")
     print()
 
     while True:
@@ -1041,8 +1060,17 @@ def confirm_tiered_execution(plan, broker_client=None):
     if broker_client:
         try:
             account_info = broker_client.get_account()
+            # Try different attribute names for buying power
+            buying_power = None
             if hasattr(account_info, 'buying_power'):
-                current_bp = float(account_info.buying_power)
+                buying_power = account_info.buying_power
+            elif hasattr(account_info, 'option_buying_power'):
+                buying_power = account_info.option_buying_power
+            elif hasattr(account_info, 'cash_available'):
+                buying_power = account_info.cash_available
+            
+            if buying_power is not None:
+                current_bp = float(buying_power)
                 # Covered calls increase buying power (credit received, no collateral)
                 bp_impact = -plan.estimated_premium  # Negative because it increases BP
                 remaining_bp = current_bp - bp_impact
@@ -1050,9 +1078,13 @@ def confirm_tiered_execution(plan, broker_client=None):
                 print(f"  │ Current Buying Power: ${current_bp:<25,.2f} │")
                 print(f"  │ BP Impact:       +${abs(bp_impact):<29,.2f} │")
                 print(f"  │ Remaining BP:    ${remaining_bp:<29,.2f} │")
-        except Exception:
-            # Silently fail if we can't get account info
-            pass
+            else:
+                print(f"  │ ℹ️  Buying power not available in account info    │")
+        except Exception as e:
+            # Show error if we can't get account info
+            print(f"  │ ⚠️  Could not fetch buying power: {str(e)[:30]:<20}│")
+    else:
+        print(f"  │ ℹ️  Buying power info unavailable (no broker client) │")
     
     print("  └" + "─" * 50 + "┘")
     
@@ -2122,10 +2154,59 @@ def execute_tiered_covered_calls(symbol, broker_client, config):
         # Display execution progress
         display_execution_progress(strategy_plan)
         
-        # For now, we'll simulate execution since the actual order submission
-        # would be handled by the main trading bot in task 6
-        print("  ⏳ Simulating order execution...")
-        print("  ✅ Orders would be submitted to broker")
+        # Actually submit the orders to the broker
+        print("  ⏳ Submitting orders to broker...")
+        
+        try:
+            # Import the TradingBot to use its order submission
+            from src.bot.trading_bot import TradingBot
+            
+            # Create a temporary config for the trading bot
+            import tempfile
+            import json
+            
+            # Read the current config
+            with open('config/config.json', 'r') as f:
+                config_data = json.load(f)
+            
+            # Set strategy to tcc
+            config_data['strategy'] = 'tcc'
+            config_data['symbols'] = [symbol]
+            config_data['run_immediately'] = True
+            
+            # Write to temp file
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as tmp:
+                json.dump(config_data, tmp)
+                tmp_path = tmp.name
+            
+            # Initialize trading bot for real execution (not dry run)
+            trading_bot = TradingBot(config_path=tmp_path, dry_run=False)
+            if not trading_bot.initialize():
+                print("  ❌ Failed to initialize trading bot for execution")
+                return False
+            
+            # Submit the orders using the trading bot's method
+            result = trading_bot.process_tiered_covered_calls(symbol)
+            
+            # Clean up temp file
+            import os
+            os.unlink(tmp_path)
+            
+            if result.success:
+                print("  ✅ Orders submitted successfully!")
+                print(f"  💰 Premium collected: ${result.premium_collected:.2f}")
+            else:
+                print("  ❌ Order submission failed")
+                if result.error_message:
+                    print(f"     Error: {result.error_message}")
+                return False
+                
+        except Exception as e:
+            print(f"  ❌ Error submitting orders: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return False
+
         
         # Display results
         display_execution_results([], strategy_plan)
@@ -2440,9 +2521,14 @@ def calculate_planned_orders(trading_bot, symbol, strategy, shares_owned=None):
                             expiration = trading_bot.broker_client.get_nearest_expiration(symbol, target_expiration)
                             
                             # Make sure short expiration is before long expiration
-                            if hasattr(long_put, 'expiration') and expiration >= long_put.expiration:
-                                print(f"  ⚠️  Skipping tier {tier_idx} - expiration too far out")
-                                continue
+                            # For diagonal spreads, short leg should expire before long leg
+                            if hasattr(long_put, 'expiration'):
+                                long_exp = long_put.expiration
+                                print(f"  📅 Tier {tier_idx}: Short exp {expiration.strftime('%m/%d/%Y')}, Long exp {long_exp.strftime('%m/%d/%Y')}")
+                                
+                                if expiration >= long_exp:
+                                    print(f"  ⚠️  Skipping tier {tier_idx} - short expiration must be before long expiration")
+                                    continue
                             
                             # Get option chain
                             option_chain = trading_bot.broker_client.get_option_chain(symbol, expiration)
@@ -3237,6 +3323,163 @@ def calculate_planned_orders(trading_bot, symbol, strategy, shares_owned=None):
                 }
             )
             
+        elif strategy == "ritmo":
+            # Roll In The Money Options
+            # Find all options expiring today that are in the money
+            try:
+                detailed_positions = trading_bot.broker_client.get_detailed_positions(symbol)
+                
+                # Filter for options expiring today
+                today = date.today()
+                expiring_today = []
+                
+                for pos in detailed_positions:
+                    if not hasattr(pos, 'expiration') or not hasattr(pos, 'option_type'):
+                        continue
+                    
+                    # Check if expiring today
+                    if pos.expiration == today and pos.quantity != 0:
+                        expiring_today.append(pos)
+                
+                if not expiring_today:
+                    print(f"  ℹ️  No options expiring today for {symbol}")
+                    return None
+                
+                print(f"  ✅ Found {len(expiring_today)} option position(s) expiring today")
+                
+                # Check which ones are in the money
+                itm_positions = []
+                for pos in expiring_today:
+                    strike = pos.strike if hasattr(pos, 'strike') else 0
+                    option_type = pos.option_type.lower() if hasattr(pos, 'option_type') else ''
+                    
+                    is_itm = False
+                    if 'call' in option_type:
+                        # Call is ITM if current price > strike
+                        is_itm = current_price > strike
+                    elif 'put' in option_type:
+                        # Put is ITM if current price < strike
+                        is_itm = current_price < strike
+                    
+                    if is_itm:
+                        itm_positions.append(pos)
+                        print(f"  💰 ITM: {option_type.upper()} ${strike:.2f} (current: ${current_price:.2f})")
+                
+                if not itm_positions:
+                    print(f"  ℹ️  No in-the-money options expiring today")
+                    print(f"     All expiring options are out of the money")
+                    return None
+                
+                print(f"  ✅ Found {len(itm_positions)} ITM option(s) to roll")
+                
+                # For each ITM position, create roll orders
+                for pos in itm_positions:
+                    strike = pos.strike
+                    quantity = abs(pos.quantity)
+                    option_type = pos.option_type.lower() if hasattr(pos, 'option_type') else ''
+                    position_type = pos.position_type if hasattr(pos, 'position_type') else 'unknown'
+                    
+                    # Determine if this is a long or short position
+                    is_long = 'long' in position_type.lower() or pos.quantity > 0
+                    
+                    # Get next available expiration
+                    try:
+                        available_expirations = trading_bot.broker_client.get_option_expirations(symbol)
+                        future_expirations = [exp for exp in available_expirations if exp > today]
+                        
+                        if not future_expirations:
+                            print(f"  ⚠️  No future expirations available for {symbol}")
+                            continue
+                        
+                        # Use the next available expiration
+                        next_expiration = future_expirations[0]
+                        
+                        # Check if it's within max days limit (if configured)
+                        days_to_next = (next_expiration - today).days
+                        max_days = getattr(trading_bot.config, 'ritmo_max_days_to_next_expiration', 30)
+                        
+                        if days_to_next > max_days:
+                            print(f"  ⚠️  Next expiration is {days_to_next} days out (max: {max_days})")
+                            continue
+                        
+                        # Get premium for the new option
+                        opt_type = 'call' if 'call' in option_type else 'put'
+                        new_premium = get_option_premium(trading_bot, symbol, strike, next_expiration, opt_type)
+                        
+                        # Get premium for closing current position (should be near intrinsic value)
+                        current_premium = get_option_premium(trading_bot, symbol, strike, today, opt_type)
+                        
+                        # Debug output
+                        print(f"  📊 Premium Analysis for {opt_type.upper()} ${strike:.2f}:")
+                        print(f"     Current (expiring today): ${current_premium:.2f}")
+                        print(f"     New ({next_expiration.strftime('%m/%d/%Y')}): ${new_premium:.2f}")
+                        
+                        # Calculate net credit/debit for the roll
+                        if is_long:
+                            # Rolling a long position: sell current, buy new
+                            # Net debit = new premium - current premium
+                            net_credit = current_premium - new_premium
+                            roll_action = "SELL TO CLOSE → BUY TO OPEN"
+                            print(f"     Net for LONG roll: ${net_credit:.2f} (sell current ${current_premium:.2f}, buy new ${new_premium:.2f})")
+                            
+                            # For long positions, we allow small debits (user is extending protection)
+                            # Check if debit is reasonable (not more than max allowed debit)
+                            max_debit = getattr(trading_bot.config, 'ritmo_max_debit_to_roll', 0.50)
+                            
+                            if net_credit < 0 and abs(net_credit) > max_debit:
+                                print(f"  ⚠️  Roll debit ${abs(net_credit):.2f} exceeds maximum ${max_debit:.2f}")
+                                print(f"     Skipping {opt_type.upper()} ${strike:.2f}")
+                                print(f"  💡 Tip: Increase 'ritmo_max_debit_to_roll' in config to allow this roll")
+                                continue
+                            
+                            # For long positions, we proceed even with small debits
+                            print(f"  ✅ Roll approved for LONG position (debit ${abs(net_credit):.2f} is acceptable)")
+                            
+                        else:
+                            # Rolling a short position: buy to close current, sell new
+                            # Net credit = new premium - current premium
+                            net_credit = new_premium - current_premium
+                            roll_action = "BUY TO CLOSE → SELL TO OPEN"
+                            print(f"     Net for SHORT roll: ${net_credit:.2f} (buy to close ${current_premium:.2f}, sell new ${new_premium:.2f})")
+                            
+                            # For short positions, we require a minimum credit
+                            min_credit = getattr(trading_bot.config, 'ritmo_min_credit_to_roll', 0.01)
+                            
+                            if net_credit < min_credit:
+                                print(f"  ⚠️  Roll credit ${net_credit:.2f} below minimum ${min_credit:.2f}")
+                                print(f"     Skipping {opt_type.upper()} ${strike:.2f}")
+                                print(f"  💡 Tip: Lower 'min_credit_to_roll' in config to allow this roll")
+                                continue
+                        
+                        # Add roll order
+                        planned_orders.append({
+                            'type': 'roll',
+                            'action': roll_action,
+                            'strike': strike,
+                            'current_expiration': today.strftime('%m/%d/%Y'),
+                            'new_expiration': next_expiration.strftime('%m/%d/%Y'),
+                            'quantity': quantity,
+                            'option_type': opt_type.upper(),
+                            'estimated_price': net_credit,
+                            'is_long': is_long,
+                            'position_type': position_type
+                        })
+                        
+                    except Exception as roll_error:
+                        print(f"  ⚠️  Could not create roll for {option_type.upper()} ${strike:.2f}: {str(roll_error)}")
+                        continue
+                
+                if not planned_orders:
+                    print(f"  ℹ️  No valid rolls found")
+                    print(f"     Check minimum credit requirements or expiration limits")
+                    return None
+                    
+            except Exception as e:
+                print(f"  ❌ Error checking positions: {str(e)}")
+                import traceback
+                traceback.print_exc()
+                return None
+        
         elif strategy == "lcc":
             # Laddered Covered Call
             call_strike = current_price * (1 + trading_bot.config.laddered_call_offset_percent / 100)
@@ -3403,6 +3646,7 @@ def verify_planned_orders(symbol, strategy, planned_orders, broker_client=None):
         symbol: Stock symbol
         strategy: Strategy code (e.g., 'pcs', 'cc', 'metf')
         planned_orders: List of order details to display
+        broker_client: Optional broker client to check for pending orders
         
     Returns:
         bool: True if user confirms, False otherwise
@@ -3427,7 +3671,8 @@ def verify_planned_orders(symbol, strategy, planned_orders, broker_client=None):
         "ic": "Iron Condor",
         "jl": "Jade Lizard",
         "bl": "Big Lizard",
-        "metf": "METF Strategy"
+        "metf": "METF Strategy",
+        "ritmo": "Roll In The Money Options"
     }
     strategy_name = strategy_names.get(strategy, strategy.upper())
     
@@ -3437,9 +3682,43 @@ def verify_planned_orders(symbol, strategy, planned_orders, broker_client=None):
     print("╚" + "═" * 68 + "╝")
     print()
     
-    print(f"  📋 Strategy: {strategy_name}")
+    print(f"  � Strate:gy: {strategy_name}")
     print(f"  📈 Symbol:   {symbol}")
     print()
+    
+    # Check for pending orders
+    if broker_client:
+        try:
+            pending_orders = broker_client.get_pending_orders(symbol)
+            if pending_orders:
+                print("  ┌" + "─" * 66 + "┐")
+                print("  │" + " " * 18 + "⚠️  PENDING ORDERS DETECTED" + " " * 20 + "│")
+                print("  ├" + "─" * 66 + "┤")
+                print(f"  │ Found {len(pending_orders)} pending order(s) for {symbol}" + " " * (66 - len(f" Found {len(pending_orders)} pending order(s) for {symbol}")) + "│")
+                print("  │" + " " * 66 + "│")
+                
+                for i, order in enumerate(pending_orders[:5], 1):  # Show max 5
+                    order_symbol = order.get("symbol", "")
+                    side = order.get("side", "")
+                    qty = order.get("quantity", 0)
+                    status = order.get("status", "")
+                    order_class = order.get("class", "")
+                    
+                    order_desc = f"{i}. {side.upper()} {qty}x {order_symbol} ({order_class}) - {status}"
+                    padding = 66 - len(f" {order_desc}")
+                    print(f"  │ {order_desc}" + " " * max(0, padding) + "│")
+                
+                if len(pending_orders) > 5:
+                    print(f"  │ ... and {len(pending_orders) - 5} more" + " " * (66 - len(f" ... and {len(pending_orders) - 5} more")) + "│")
+                
+                print("  │" + " " * 66 + "│")
+                print("  │ ⚠️  WARNING: Placing new orders may conflict with pending orders  │")
+                print("  │    Consider waiting for pending orders to fill or cancel them    │")
+                print("  └" + "─" * 66 + "┘")
+                print()
+        except Exception as e:
+            # Silently continue if we can't check pending orders
+            pass
     
     # Display METF signal justification if present
     if strategy == "metf" and planned_orders:
@@ -3533,7 +3812,24 @@ def verify_planned_orders(symbol, strategy, planned_orders, broker_client=None):
         est_price = order.get('estimated_price', 0)
         
         # Format the order line
-        if order_type == 'spread':
+        if order_type == 'roll':
+            # Special handling for roll orders
+            current_exp = order.get('current_expiration', 'N/A')
+            new_exp = order.get('new_expiration', 'N/A')
+            is_long = order.get('is_long', False)
+            
+            print(f"  │ {i}. ROLL {quantity}x {symbol} ${strike:.2f} {option_type.upper()}" + " " * max(0, 35 - len(f"{i}. ROLL {quantity}x {symbol} ${strike:.2f} {option_type.upper()}")) + "│")
+            print(f"  │    From: {current_exp} → To: {new_exp}" + " " * (66 - len(f"    From: {current_exp} → To: {new_exp}")) + "│")
+            print(f"  │    Position: {'LONG' if is_long else 'SHORT'}" + " " * (66 - len(f"    Position: {'LONG' if is_long else 'SHORT'}")) + "│")
+            if est_price > 0:
+                total_credit += est_price * quantity * 100
+                print(f"  │    Est. Net Credit: ${est_price:.2f} (${est_price * quantity * 100:.2f} total)" + " " * (66 - len(f"    Est. Net Credit: ${est_price:.2f} (${est_price * quantity * 100:.2f} total)")) + "│")
+            elif est_price < 0:
+                total_debit += abs(est_price) * quantity * 100
+                print(f"  │    Est. Net Debit: ${abs(est_price):.2f} (${abs(est_price) * quantity * 100:.2f} total)" + " " * (66 - len(f"    Est. Net Debit: ${abs(est_price):.2f} (${abs(est_price) * quantity * 100:.2f} total)")) + "│")
+            else:
+                print(f"  │    Est. Net: $0.00 (even roll)" + " " * (66 - len(f"    Est. Net: $0.00 (even roll)")) + "│")
+        elif order_type == 'spread':
             short_strike = order.get('short_strike', 0)
             long_strike = order.get('long_strike', 0)
             spread_type = order.get('spread_type', 'credit')

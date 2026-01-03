@@ -6,7 +6,9 @@
     "AAPL",
     "GOOGL",
     "NVDA",
-    "USFR"
+    "USFR",
+    "TLT",
+    "QQQ"
   ],
   "contract_quantity": 1,
   "run_immediately": false,
@@ -111,9 +113,15 @@
     },
     "tpd": {
       "name": "Tiered Put Diagonal",
-      "target_percent_below": 2.0,
+      "target_percent_below": 1.0,
       "num_tiers": 3,
       "tier_spacing_weeks": 1
+    },
+    "ritmo": {
+      "name": "Roll In The Money Options",
+      "min_credit_to_roll": 0.01,
+      "max_debit_to_roll": 0.50,
+      "max_days_to_next_expiration": 30
     }
   },
   "brokers": {
