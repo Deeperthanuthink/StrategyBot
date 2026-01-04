@@ -2486,8 +2486,52 @@ def calculate_planned_orders(trading_bot, symbol, strategy, shares_owned=None):
                     if long_put_strike == 0:
                         continue
                     
-                    # Create 3 tiers: 1 week, 2 weeks, 3 weeks out
-                    tier_expirations = [7, 14, 21]  # days out
+                    # Get next 3 available expirations starting from 1 week out
+                    try:
+                        available_expirations = trading_bot.broker_client.get_option_expirations(symbol)
+                        # Use same logic as TCC: filter by min/max days and validate put options exist
+                        today = date.today()
+                        min_date = today + timedelta(days=7)  # Start 1 week out
+                        max_date = today + timedelta(days=60)  # Max 60 days out
+                        long_exp = long_put.expiration if hasattr(long_put, 'expiration') else None
+                        
+                        # Filter by date range and before long put expiration
+                        if long_exp:
+                            filtered_expirations = [exp for exp in available_expirations 
+                                                   if min_date <= exp <= max_date and exp < long_exp]
+                        else:
+                            filtered_expirations = [exp for exp in available_expirations 
+                                                   if min_date <= exp <= max_date]
+                        
+                        if not filtered_expirations:
+                            print(f"  ⚠️  No valid expirations found for long put ${long_put_strike:.2f}")
+                            continue
+                        
+                        # Validate that each expiration has put options available (like TCC validates calls)
+                        validated_expirations = []
+                        for expiration in filtered_expirations[:5]:  # Check up to 5 to get 3 valid
+                            try:
+                                options = trading_bot.broker_client.get_option_chain(symbol, expiration)
+                                put_options = [opt for opt in options if opt.option_type and opt.option_type.lower() == 'put']
+                                
+                                if put_options:
+                                    validated_expirations.append(expiration)
+                                    if len(validated_expirations) >= 3:
+                                        break
+                            except Exception:
+                                continue
+                        
+                        if not validated_expirations:
+                            print(f"  ⚠️  No expirations with put options found for long put ${long_put_strike:.2f}")
+                            continue
+                        
+                        # Take up to 3 validated expirations
+                        tier_expirations = validated_expirations[:3]
+                        
+                    except Exception as e:
+                        print(f"  ⚠️  Could not get expirations: {str(e)}")
+                        continue
+                    
                     tier_quantities = []
                     
                     # Distribute quantity across tiers
@@ -2509,17 +2553,11 @@ def calculate_planned_orders(trading_bot, symbol, strategy, shares_owned=None):
                             tier_quantities[i] = 1
                     
                     # Create orders for each tier
-                    for tier_idx, (days_out, qty) in enumerate(zip(tier_expirations, tier_quantities), 1):
+                    for tier_idx, (expiration, qty) in enumerate(zip(tier_expirations, tier_quantities), 1):
                         if qty == 0:
                             continue
-                            
-                        # Target expiration for this tier
-                        target_expiration = date.today() + timedelta(days=days_out)
                         
                         try:
-                            # Find nearest available expiration
-                            expiration = trading_bot.broker_client.get_nearest_expiration(symbol, target_expiration)
-                            
                             # Make sure short expiration is before long expiration
                             # For diagonal spreads, short leg should expire before long leg
                             if hasattr(long_put, 'expiration'):
