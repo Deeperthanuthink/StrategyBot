@@ -1,0 +1,37 @@
+{
+  "name": "Put Credit Spread",
+  "description": "Screens for stocks suitable for selling put credit spreads, which profit when the stock stays above the short strike price",
+  "default_filters": {
+    "min_market_cap": 2000000000,
+    "min_volume": 1000000,
+    "price_min": 20,
+    "price_max": 200,
+    "rsi_min": 40,
+    "rsi_max": 70,
+    "above_sma20": true,
+    "above_sma50": true,
+    "weekly_perf_min": -5,
+    "weekly_perf_max": 10,
+    "beta_min": 0.5,
+    "beta_max": 1.5,
+    "optionable": true,
+    "shortable": true,
+    "earnings_buffer_days": 14
+  },
+  "scoring_weights": {
+    "iv_rank": 30,
+    "technical_strength": 25,
+    "liquidity": 20,
+    "stability": 25
+  },
+  "analysis_settings": {
+    "default_dte": 45,
+    "spread_width_under_50": 2.5,
+    "spread_width_50_to_100": 5,
+    "spread_width_over_100": 10,
+    "ideal_beta_min": 0.7,
+    "ideal_beta_max": 1.3,
+    "ideal_rsi_min": 45,
+    "ideal_rsi_max": 65
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "Covered Call",
+  "description": "Screens for stocks suitable for covered call strategies, generating income from owned shares",
+  "default_filters": {
+    "min_market_cap": 1000000000,
+    "min_volume": 500000,
+    "price_min": 10,
+    "price_max": 300,
+    "rsi_min": 30,
+    "rsi_max": 80,
+    "beta_min": 0.3,
+    "beta_max": 2.0,
+    "optionable": true
+  },
+  "scoring_weights": {
+    "dividend_yield": 25,
+    "iv_rank": 25,
+    "technical_stability": 30,
+    "liquidity": 20
+  },
+  "analysis_settings": {
+    "default_dte": 30,
+    "target_delta": 0.30,
+    "min_premium_target": 1.0
+  }
+}

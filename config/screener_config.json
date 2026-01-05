@@ -1,0 +1,15 @@
+{
+  "finviz": {
+    "credentials_path": ".env",
+    "rate_limit_delay": 1.0,
+    "max_retries": 3
+  },
+  "storage": {
+    "results_dir": "data/screener_results",
+    "max_history_entries": 100
+  },
+  "analysis": {
+    "risk_free_rate": 0.05,
+    "default_dte": 45
+  }
+}

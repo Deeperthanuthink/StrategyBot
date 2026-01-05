@@ -1,0 +1,25 @@
+{
+  "name": "Collar",
+  "description": "Screens for stocks suitable for collar strategies, protecting downside while capping upside on owned shares",
+  "default_filters": {
+    "min_market_cap": 2000000000,
+    "min_volume": 1000000,
+    "price_min": 20,
+    "price_max": 300,
+    "beta_min": 0.5,
+    "beta_max": 2.5,
+    "optionable": true
+  },
+  "scoring_weights": {
+    "downside_protection": 35,
+    "cost_efficiency": 25,
+    "liquidity": 20,
+    "volatility": 20
+  },
+  "analysis_settings": {
+    "default_dte": 60,
+    "put_delta_target": 0.20,
+    "call_delta_target": 0.30,
+    "max_net_cost": 0.5
+  }
+}

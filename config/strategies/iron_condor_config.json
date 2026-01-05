@@ -1,0 +1,27 @@
+{
+  "name": "Iron Condor",
+  "description": "Screens for stocks suitable for iron condor strategies, profiting from low volatility and range-bound movement",
+  "default_filters": {
+    "min_market_cap": 5000000000,
+    "min_volume": 2000000,
+    "price_min": 50,
+    "price_max": 500,
+    "rsi_min": 35,
+    "rsi_max": 65,
+    "beta_min": 0.4,
+    "beta_max": 1.2,
+    "optionable": true,
+    "shortable": true
+  },
+  "scoring_weights": {
+    "iv_rank": 35,
+    "range_bound": 30,
+    "liquidity": 20,
+    "stability": 15
+  },
+  "analysis_settings": {
+    "default_dte": 45,
+    "wing_width": 10,
+    "target_credit_percentage": 0.25
+  }
+}
